@@ -83,6 +83,8 @@ from gbmi.exp_max_of_n.plot import (
 )
 from gbmi.exp_max_of_n.train import (
     MAX_OF_4_CONFIG,
+    MAX_OF_5_CONFIG,
+    MAX_OF_10_CONFIG,
     SEEDS,
     SELECTED_SEED,
     MaxOfNDataModule,
@@ -90,7 +92,7 @@ from gbmi.exp_max_of_n.train import (
     train_or_load_model,
 )
 from gbmi.exp_max_of_n.verification import LargestWrongLogitQuadraticConfig
-from gbmi.utils import default_device, patch
+from gbmi.utils import default_device, patch, to_device
 from gbmi.utils.dataclass import enumerate_dataclass_values
 from gbmi.utils.hashing import get_hash_ascii
 from gbmi.utils.instructions import (
@@ -100,6 +102,8 @@ from gbmi.utils.instructions import (
     CountTensorOperations,
     InstructionCount,
     PatchTorch,
+    PerfCollector,
+    PerfCounter,
     int_or_value,
 )
 from gbmi.utils.latex_export import format_float_full_precision, to_latex_defs
@@ -137,55 +141,90 @@ parser.add_argument(
     default=True,
     help="Include plots",
 )
+parser.add_argument(
+    "--K",
+    type=int,
+    default=5,
+    help="Sequence length",
+)
+parser.add_argument(
+    "--d_vocab",
+    type=int,
+    default=64,
+    help="Number of tokens",
+)
+parser.add_argument(
+    "--brute-force",
+    action=BooleanOptionalAction,
+    default=False,
+    help="Include brute force and ablations",
+)
+parser.add_argument(
+    "--only-download",
+    action=BooleanOptionalAction,
+    default=False,
+    help="Only download models, then quit",
+)
 cli_args = parser.parse_args(None if ipython is None else ["--ignore-csv"])
 # %%
-cache_dir = Path(__file__).parent / ".cache"
+seq_len: int = cli_args.K
+D_VOCAB: int = cli_args.d_vocab
+adjusted_file_path = Path(__file__).parent / Path(__file__).name.replace(
+    "_K_", f"_{seq_len}_"
+)
+cache_dir = adjusted_file_path.parent / ".cache"
 cache_dir.mkdir(exist_ok=True)
 OVERWRITE_CSV_FROM_CACHE: bool = not cli_args.ignore_csv  # @param {type:"boolean"}
 compute_expensive_average_across_many_models: bool = True  # @param {type:"boolean"}
-TRAIN_CSV_PATH = Path(__file__).with_suffix("") / "all-models-train-values.csv"
+TRAIN_CSV_PATH = adjusted_file_path.with_suffix("") / "all-models-train-values.csv"
 TRAIN_CSV_PATH.parent.mkdir(exist_ok=True, parents=True)
+INCLUDE_BRUTE_FORCE: bool = cli_args.brute_force  # @param {type:"boolean"}
+QUIT_AFTER_MODEL_DOWNLOAD: bool = cli_args.only_download  # @param {type:"boolean"}
 BRUTE_FORCE_CSV_PATH = (
-    Path(__file__).with_suffix("") / "all-models-brute-force-values.csv"
+    adjusted_file_path.with_suffix("") / "all-models-brute-force-values.csv"
 )
 BRUTE_FORCE_CSV_PATH.parent.mkdir(exist_ok=True, parents=True)
-CUBIC_CSV_PATH = Path(__file__).with_suffix("") / "all-models-cubic-values.csv"
+CUBIC_CSV_PATH = adjusted_file_path.with_suffix("") / "all-models-cubic-values.csv"
 CUBIC_CSV_PATH.parent.mkdir(exist_ok=True, parents=True)
-SUBCUBIC_CSV_PATH = Path(__file__).with_suffix("") / "all-models-subcubic-values.csv"
+SUBCUBIC_CSV_PATH = (
+    adjusted_file_path.with_suffix("") / "all-models-subcubic-values.csv"
+)
 SUBCUBIC_CSV_PATH.parent.mkdir(exist_ok=True, parents=True)
 SUBCUBIC_ANALYSIS_CSV_PATH = (
-    Path(__file__).with_suffix("") / "all-models-subcubic-analysis-values.csv"
+    adjusted_file_path.with_suffix("") / "all-models-subcubic-analysis-values.csv"
 )
 SUBCUBIC_ANALYSIS_CSV_PATH.parent.mkdir(exist_ok=True, parents=True)
 PYTHON_VERSION_PATH = (
-    Path(__file__).with_suffix("") / "all-models-values-python-version.txt"
+    adjusted_file_path.with_suffix("") / "all-models-values-python-version.txt"
 )
 PYTHON_VERSION_PATH.parent.mkdir(exist_ok=True, parents=True)
 TORCH_VERSION_PATH = (
-    Path(__file__).with_suffix("") / "all-models-values-torch-version.txt"
+    adjusted_file_path.with_suffix("") / "all-models-values-torch-version.txt"
 )
 TORCH_VERSION_PATH.parent.mkdir(exist_ok=True, parents=True)
-GIT_DIFF_PATH = Path(__file__).with_suffix("") / "all-models-values-git-diff-info.diff"
+GIT_DIFF_PATH = (
+    adjusted_file_path.with_suffix("") / "all-models-values-git-diff-info.diff"
+)
 GIT_DIFF_PATH.parent.mkdir(exist_ok=True, parents=True)
-GIT_SHA_PATH = Path(__file__).with_suffix("") / "all-models-values-git-sha.txt"
+GIT_SHA_PATH = adjusted_file_path.with_suffix("") / "all-models-values-git-sha.txt"
 GIT_SHA_PATH.parent.mkdir(exist_ok=True, parents=True)
 GIT_SHA_SHORT_PATH = (
-    Path(__file__).with_suffix("") / "all-models-values-git-sha-short.txt"
+    adjusted_file_path.with_suffix("") / "all-models-values-git-sha-short.txt"
 )
 GIT_SHA_SHORT_PATH.parent.mkdir(exist_ok=True, parents=True)
-LATEX_VALUES_PATH = Path(__file__).with_suffix("") / "all-models-values.tex"
+LATEX_VALUES_PATH = adjusted_file_path.with_suffix("") / "all-models-values.tex"
 LATEX_VALUES_PATH.parent.mkdir(exist_ok=True, parents=True)
 LATEX_VALUES_DATATABLE_PATH = (
-    Path(__file__).with_suffix("") / "all-models-all-values.csv"
+    adjusted_file_path.with_suffix("") / "all-models-all-values.csv"
 )
 LATEX_VALUES_DATATABLE_PATH.parent.mkdir(exist_ok=True, parents=True)
-LATEX_FIGURE_PATH = Path(__file__).with_suffix("") / "figures"
+LATEX_FIGURE_PATH = adjusted_file_path.with_suffix("") / "figures"
 LATEX_FIGURE_PATH.mkdir(exist_ok=True, parents=True)
 LATEX_TIKZPLOTLIB_PREAMBLE_PATH = (
-    Path(__file__).with_suffix("") / "tikzplotlib-preamble.tex"
+    adjusted_file_path.with_suffix("") / "tikzplotlib-preamble.tex"
 )
 LATEX_TIKZPLOTLIB_PREAMBLE_PATH.parent.mkdir(exist_ok=True, parents=True)
-SHARED_CACHE_STEM = Path(__file__).name.replace("_all_models", "")
+SHARED_CACHE_STEM = adjusted_file_path.name.replace("_all_models", "")
 N_THREADS: Optional[int] = cli_args.n_threads
 DISPLAY_PLOTS: bool = False  # @param {type:"boolean"}
 SAVE_PLOTS: bool = cli_args.plots
@@ -206,17 +245,6 @@ matplotlib.rcParams[
 \providecommand{\barWE}{\ensuremath{\mathbf{\bar{E}}}}
 \providecommand{\qWE}{\ensuremath{\mathbf{E}_q}}
 """
-default_OV_colorscale_2024_03_26: Colorscale = px.colors.get_colorscale(
-    "RdBu"
-)  # px.colors.get_colorscale("Picnic_r")
-# default_OV_matplotlib_colorscale_2024_03_26: Colorscale = 'bwr_r'
-default_QK_colorscale_2024_03_26: Colorscale = [
-    [0, "#ff0000"],
-    [0.25, "#ff8247"],
-    [0.5, "white"],
-    [0.75, "#ffc100"],
-    [1, "#ff9c05"],
-]
 default_OV_colorscale_2024_06_15: Colorscale = px.colors.get_colorscale("IceFire_r")
 default_QK_colorscale_2024_06_15: Colorscale = px.colors.get_colorscale("IceFire_r")
 # alt: Edge_r, Twilight, twilight_shifted, shift_cyclical_colorscale(px.colors.get_colorscale("Edge"), shift=0)
@@ -269,7 +297,7 @@ for name, (args, kwargs) in [
     except Exception as e:
         print(f"Error running {name}: {e}")
     else:
-        with open(Path(__file__).with_suffix("") / f"{name}.txt", "w") as f:
+        with open(adjusted_file_path.with_suffix("") / f"{name}.txt", "w") as f:
             f.write(result)
 
 with open(GIT_DIFF_PATH, "w") as f:
@@ -299,7 +327,17 @@ seeds = (
 )
 if SELECTED_SEED in seeds:
     seeds = [SELECTED_SEED] + [s for s in seeds if s != SELECTED_SEED]
-cfgs = {seed: MAX_OF_4_CONFIG(seed) for seed in list(seeds)}
+match seq_len:
+    case 4:
+        cfgs = {seed: MAX_OF_4_CONFIG(seed) for seed in list(seeds)}
+    case 5:
+        cfgs = {seed: MAX_OF_5_CONFIG(seed) for seed in list(seeds)}
+    case 10:
+        cfgs = {
+            seed: MAX_OF_10_CONFIG(seed, d_vocab_out=D_VOCAB) for seed in list(seeds)
+        }
+    case _:
+        raise ValueError(f"Unsupported seq_len: {seq_len}")
 cfg_hashes = {seed: get_hash_ascii(cfg) for seed, cfg in cfgs.items()}
 model_cfgs = {
     seed: MaxOfNTrainingWrapper.build_model_config(cfg) for seed, cfg in cfgs.items()
@@ -310,11 +348,15 @@ cfg_hashes_for_filename = {
     for seed, cfg in cfgs.items()
 }
 # %%
+
+
+# %%
 # patch torch.load so that when loading cache from non-CPU devices we can still load
 with patch(torch, load=partial(torch.load, map_location=torch.device("cpu"))):
     with memoshelve(
         train_or_load_model,
-        filename=cache_dir / f"{SHARED_CACHE_STEM}.train_or_load_model",
+        filename=cache_dir
+        / f"{SHARED_CACHE_STEM}.train_or_load_model{f'_d_vocab_{D_VOCAB}' if D_VOCAB != 64 else ''}",
         get_hash=get_hash_ascii,
     )() as memo_train_or_load_model:
         runtime_models = {}
@@ -327,6 +369,16 @@ with patch(torch, load=partial(torch.load, map_location=torch.device("cpu"))):
                 print(f"Error loading model for seed {seed}: {e}")
 
         maybe_parallel_map(_handle_memo_train_or_load_model, tqdm(cfgs.items()))
+# %%
+assert all(
+    model.cfg.d_vocab == D_VOCAB for _runtime, model in runtime_models.values()
+), {seed: model.cfg.d_vocab for seed, (_runtime, model) in runtime_models.items()}
+assert all(model.cfg.n_ctx == seq_len for _runtime, model in runtime_models.values()), {
+    seed: model.cfg.n_ctx for seed, (_runtime, model) in runtime_models.items()
+}
+# %%
+if __name__ == "__main__" and QUIT_AFTER_MODEL_DOWNLOAD:
+    sys.exit(0)
 # %%
 training_wrappers = {
     seed: MaxOfNTrainingWrapper(cfgs[seed], model)
@@ -355,6 +407,7 @@ def update_csv_with_rows(
             subset=subset, keep="last"
         )
     results.to_csv(csv_path, index=False)
+    return results
 
 
 def update_csv(
@@ -365,7 +418,7 @@ def update_csv(
     subset: str | list[str] = "seed",
 ):
     new_data = [data[seed] for seed in sorted(data.keys())]
-    update_csv_with_rows(csv_path, new_data, columns=columns, subset=subset)
+    return update_csv_with_rows(csv_path, new_data, columns=columns, subset=subset)
 
 
 # %%
@@ -391,9 +444,9 @@ def _run_train_batch_loss_accuracy(
 ) -> Tuple[float, float, int]:
     xs, ys = next(dataloader_iter)
     device = default_device(deterministic=train_measurement_deterministic)
-    xs.to(device)
-    ys.to(device)
-    loss, accuracy = training_wrappers[seed].run_batch((xs, ys), log_output=False)
+    loss, accuracy = training_wrappers[seed].run_batch(
+        (xs, ys), log_output=False, device=device
+    )
     loss = loss.item()
     return loss, accuracy, batch_size
 
@@ -464,7 +517,7 @@ train_data = {
     for seed in runtime_models.keys()
 }
 
-update_csv(TRAIN_CSV_PATH, train_data, columns=train_columns)
+all_train_data = update_csv(TRAIN_CSV_PATH, train_data, columns=train_columns)
 
 # %%
 num_seeds = len(train_average_loss)
@@ -485,249 +538,303 @@ latex_values |= data_summary(train_average_loss, prefix="TrainLoss")
 # %% [markdown]
 # # Brute Force Proof
 # %%
-all_tokens_datasets = {
-    seed: SequenceDataset(seq_len=model.cfg.n_ctx, vocab_size=model.cfg.d_vocab)
-    for seed, (_runtime, model) in runtime_models.items()
-}
+if INCLUDE_BRUTE_FORCE:
+    all_tokens_datasets = {
+        seed: SequenceDataset(seq_len=model.cfg.n_ctx, vocab_size=model.cfg.d_vocab)
+        for seed, (_runtime, model) in runtime_models.items()
+    }
 # %%
-brute_force_columns = [
-    "seed",
-    "loss",
-    "accuracy",
-    "num_correct",
-    "num_incorrect",
-    "cpu",
-    "duration",
-]
-if os.path.exists(BRUTE_FORCE_CSV_PATH):
-    brute_force_results = pd.read_csv(BRUTE_FORCE_CSV_PATH)
-else:
-    brute_force_results = pd.DataFrame(columns=brute_force_columns)
+if INCLUDE_BRUTE_FORCE:
+    brute_force_columns = [
+        "seed",
+        "loss",
+        "accuracy",
+        "num_correct",
+        "num_incorrect",
+        "cpu",
+        "duration",
+    ]
+    if os.path.exists(BRUTE_FORCE_CSV_PATH):
+        brute_force_results = pd.read_csv(BRUTE_FORCE_CSV_PATH)
+    else:
+        brute_force_results = pd.DataFrame(columns=brute_force_columns)
 
-brute_force_proof_deterministic: bool = True  # @param {type:"boolean"}
+    brute_force_proof_deterministic: bool = True  # @param {type:"boolean"}
 
-batch_size = 4096  # 16_384 # 8182
+    batch_size = 4096  # 16_384 # 8182
 
-all_seeds = set(runtime_models.keys())
-unknown_seeds = all_seeds - set(brute_force_results["seed"])
-known_seeds = all_seeds - unknown_seeds
-relevant_seeds = all_seeds if OVERWRITE_CSV_FROM_CACHE else unknown_seeds
-brute_force_data = {
-    seed: brute_force_results[brute_force_results["seed"] == seed].iloc[0].to_dict()
-    for seed in known_seeds
-}
+    all_seeds = set(runtime_models.keys())
+    unknown_seeds = all_seeds - set(brute_force_results["seed"])
+    known_seeds = all_seeds - unknown_seeds
+    relevant_seeds = all_seeds if OVERWRITE_CSV_FROM_CACHE else unknown_seeds
+    brute_force_data = {
+        seed: brute_force_results[brute_force_results["seed"] == seed].iloc[0].to_dict()
+        for seed in known_seeds
+    }
 
+    def get_brute_force_for(seed: int, *, pbar: tqdm):
+        cfg_hash_for_filename = cfg_hashes_for_filename[seed]
+        training_wrapper = training_wrappers[seed]
+        all_tokens_dataset = all_tokens_datasets[seed]
+        total_loss = 0.0
+        total_accuracy = 0.0
+        total_samples = 0
+        total_duration = 0.0
+        # all_incorrect_sequences = []
 
-def get_brute_force_for(seed: int, *, pbar: tqdm):
-    cfg_hash_for_filename = cfg_hashes_for_filename[seed]
-    training_wrapper = training_wrappers[seed]
-    all_tokens_dataset = all_tokens_datasets[seed]
-    total_loss = 0.0
-    total_accuracy = 0.0
-    total_samples = 0
-    total_duration = 0.0
-    # all_incorrect_sequences = []
-
-    # loop for computing overall loss and accuracy
-    @torch.no_grad()
-    def _run_batch_loss_accuracy(
-        i: int, batch_size: int, return_incorrect_sequences: bool = True
-    ) -> Tuple[
-        Union[Tuple[float, float, int], Tuple[Tuple[float, float, int], Tensor]], float
-    ]:
-        batch = all_tokens_dataset[i : i + batch_size]
-        size = batch.shape[0]
-        device = default_device(deterministic=brute_force_proof_deterministic)
-        batch.to(device)
-        duration = 0.0
-        start = time.time()
-        labels = training_wrapper.config.experiment.get_ground_truth(batch)
-        xs, ys, y_preds = training_wrapper.compute_batch((batch, labels), device=device)
-        loss = training_wrapper.loss_fn(
-            y_preds, ys, log_softmax=training_wrapper.log_softmax
-        ).item()
-        full_accuracy = training_wrapper.acc_fn_per_seq(y_preds, ys)
-        accuracy = full_accuracy.float().mean().item()
-        duration += time.time() - start
-        if return_incorrect_sequences:
-            return ((loss, accuracy, size), xs[~full_accuracy]), duration
-        return (loss, accuracy, size), duration
-
-    with memoshelve(
-        _run_batch_loss_accuracy,
-        filename=cache_dir
-        / f"{SHARED_CACHE_STEM}.run_batch_loss_accuracy-{cfg_hash_for_filename}-{brute_force_proof_deterministic}",
-        get_hash_mem=(lambda x: x[0]),
-        get_hash=str,
-        cache={},
-    )() as run_batch_loss_accuracy_heavy:
-
-        def _run_batch_loss_accuracy_lightweight(*args, **kwargs):
-            res = run_batch_loss_accuracy_heavy(*args, **kwargs)
-            ((loss, accuracy, size), incorrect_sequences), duration = res
+        # loop for computing overall loss and accuracy
+        @torch.no_grad()
+        def _run_batch_loss_accuracy(
+            i: int, batch_size: int, return_incorrect_sequences: bool = True
+        ) -> Tuple[
+            Union[Tuple[float, float, int], Tuple[Tuple[float, float, int], Tensor]],
+            float,
+        ]:
+            batch = all_tokens_dataset[i : i + batch_size]
+            size = batch.shape[0]
+            device = default_device(deterministic=brute_force_proof_deterministic)
+            batch.to(device)
+            duration = 0.0
+            start = time.time()
+            labels = training_wrapper.config.experiment.get_ground_truth(batch)
+            xs, ys, y_preds = training_wrapper.compute_batch(
+                (batch, labels), device=device
+            )
+            loss = training_wrapper.loss_fn(
+                y_preds, ys, log_softmax=training_wrapper.log_softmax
+            ).item()
+            full_accuracy = training_wrapper.acc_fn_per_seq(y_preds, ys)
+            accuracy = full_accuracy.float().mean().item()
+            duration += time.time() - start
+            if return_incorrect_sequences:
+                return ((loss, accuracy, size), xs[~full_accuracy]), duration
             return (loss, accuracy, size), duration
 
         with memoshelve(
-            _run_batch_loss_accuracy_lightweight,
+            _run_batch_loss_accuracy,
             filename=cache_dir
-            / f"{SHARED_CACHE_STEM}.run_batch_loss_accuracy-lightweight-{cfg_hash_for_filename}-{brute_force_proof_deterministic}",
+            / f"{SHARED_CACHE_STEM}.run_batch_loss_accuracy-{cfg_hash_for_filename}-{brute_force_proof_deterministic}",
             get_hash_mem=(lambda x: x[0]),
             get_hash=str,
-        )() as run_batch_loss_accuracy:
-            for i in range(0, len(all_tokens_dataset), batch_size):
-                (loss, accuracy, size), duration = run_batch_loss_accuracy(i, batch_size)  # type: ignore
-                total_duration += duration
-                # Accumulate loss and accuracy
-                # start = time.time()
-                total_loss += loss * size
-                total_accuracy += accuracy * size
-                total_samples += size
-                # total_duration += time.time() - start
-                # all_incorrect_sequences.append(incorrect_sequences)
-                pbar.update(batch_size)
+            cache={},
+        )() as run_batch_loss_accuracy_heavy:
 
-    # Calculate average loss and accuracy
-    average_loss = total_loss / total_samples
-    average_accuracy = total_accuracy / total_samples
-    # incorrect_sequences = torch.cat(all_incorrect_sequences, dim=0)
-    num_correct_sequences = int(round(average_accuracy * all_tokens_dataset.length))
-    num_incorrect_sequences = all_tokens_dataset.length - num_correct_sequences
+            def _run_batch_loss_accuracy_lightweight(*args, **kwargs):
+                res = run_batch_loss_accuracy_heavy(*args, **kwargs)
+                ((loss, accuracy, size), incorrect_sequences), duration = res
+                return (loss, accuracy, size), duration
 
-    row = {
-        "seed": seed,
-        "cpu": brute_force_proof_deterministic,
-        "loss": average_loss,
-        "accuracy": average_accuracy,
-        "num_correct": num_correct_sequences,
-        "num_incorrect": num_incorrect_sequences,
-        "duration": total_duration,
-    }
-    return row
+            with memoshelve(
+                _run_batch_loss_accuracy_lightweight,
+                filename=cache_dir
+                / f"{SHARED_CACHE_STEM}.run_batch_loss_accuracy-lightweight-{cfg_hash_for_filename}-{brute_force_proof_deterministic}",
+                get_hash_mem=(lambda x: x[0]),
+                get_hash=str,
+            )() as run_batch_loss_accuracy:
+                for i in range(0, len(all_tokens_dataset), batch_size):
+                    (loss, accuracy, size), duration = run_batch_loss_accuracy(i, batch_size)  # type: ignore
+                    total_duration += duration
+                    # Accumulate loss and accuracy
+                    # start = time.time()
+                    total_loss += loss * size
+                    total_accuracy += accuracy * size
+                    total_samples += size
+                    # total_duration += time.time() - start
+                    # all_incorrect_sequences.append(incorrect_sequences)
+                    pbar.update(batch_size)
 
+        # Calculate average loss and accuracy
+        average_loss = total_loss / total_samples
+        average_accuracy = total_accuracy / total_samples
+        # incorrect_sequences = torch.cat(all_incorrect_sequences, dim=0)
+        num_correct_sequences = int(round(average_accuracy * all_tokens_dataset.length))
+        num_incorrect_sequences = all_tokens_dataset.length - num_correct_sequences
 
-def _handle_brute_force_for(seed: int, *, pbar: tqdm):
-    try:
-        brute_force_data[seed] = get_brute_force_for(seed, pbar=pbar)
-    except Exception as e:
-        print(f"Error computing brute force proof for seed {seed}: {e}")
-        traceback.print_exc()
+        row = {
+            "seed": seed,
+            "cpu": brute_force_proof_deterministic,
+            "loss": average_loss,
+            "accuracy": average_accuracy,
+            "num_correct": num_correct_sequences,
+            "num_incorrect": num_incorrect_sequences,
+            "duration": total_duration,
+        }
+        return row
 
+    def _handle_brute_force_for(seed: int, *, pbar: tqdm):
+        try:
+            brute_force_data[seed] = get_brute_force_for(seed, pbar=pbar)
+        except Exception as e:
+            print(f"Error computing brute force proof for seed {seed}: {e}")
+            traceback.print_exc()
 
-lengths = [
-    len(
-        SequenceDataset(
-            seq_len=runtime_models[seed][1].cfg.n_ctx,
-            vocab_size=runtime_models[seed][1].cfg.d_vocab,
+    lengths = [
+        len(
+            SequenceDataset(
+                seq_len=runtime_models[seed][1].cfg.n_ctx,
+                vocab_size=runtime_models[seed][1].cfg.d_vocab,
+            )
         )
-    )
-    for seed in relevant_seeds
-]
+        for seed in relevant_seeds
+    ]
 
-total_batches = sum(
-    length - length % batch_size + (batch_size if length % batch_size != 0 else 0)
-    for length in lengths
-)
-
-with tqdm(total=total_batches, desc="batches for brute force", position=0) as pbar:
-    # with PeriodicGarbageCollector(60):
-    maybe_parallel_map(
-        partial(_handle_brute_force_for, pbar=pbar), sorted(relevant_seeds)
+    total_batches = sum(
+        length - length % batch_size + (batch_size if length % batch_size != 0 else 0)
+        for length in lengths
     )
 
-update_csv(BRUTE_FORCE_CSV_PATH, brute_force_data, columns=brute_force_columns)
+    with tqdm(total=total_batches, desc="batches for brute force", position=0) as pbar:
+        # with PeriodicGarbageCollector(60):
+        maybe_parallel_map(
+            partial(_handle_brute_force_for, pbar=pbar), sorted(relevant_seeds)
+        )
+
+    all_brute_force_data = update_csv(
+        BRUTE_FORCE_CSV_PATH, brute_force_data, columns=brute_force_columns
+    )
 
 # %%
-assert len(brute_force_data) == len(
-    runtime_models
-), f"len(brute_force_data) == {len(brute_force_data)} != {len(runtime_models)} == len(runtime_models)"
-all_tokens_datasets_lens = {seed: len(d) for seed, d in all_tokens_datasets.items()}
-assert (
-    len(set(all_tokens_datasets_lens.values())) == 1
-), f"Multiple dataset lengths! {set(all_tokens_datasets_lens.values())}"
-latex_values["BruteForceCPU"] = brute_force_proof_deterministic
-latex_values["BruteForceBatchSize"] = batch_size
-latex_values["BruteForceNumBatches"] = int(
-    math.ceil(list(all_tokens_datasets_lens.values())[0] / batch_size)
-)
+if INCLUDE_BRUTE_FORCE:
+    assert len(brute_force_data) == len(
+        runtime_models
+    ), f"len(brute_force_data) == {len(brute_force_data)} != {len(runtime_models)} == len(runtime_models)"
+    all_tokens_datasets_lens = {seed: len(d) for seed, d in all_tokens_datasets.items()}
+    assert (
+        len(set(all_tokens_datasets_lens.values())) == 1
+    ), f"Multiple dataset lengths! {set(all_tokens_datasets_lens.values())}"
+    latex_values["BruteForceCPU"] = brute_force_proof_deterministic
+    latex_values["BruteForceBatchSize"] = batch_size
+    latex_values["BruteForceNumBatches"] = int(
+        math.ceil(list(all_tokens_datasets_lens.values())[0] / batch_size)
+    )
 
-brute_force_data_by_key = defaultdict(dict)
-for seed, d in brute_force_data.items():
-    for k, v in d.items():
-        brute_force_data_by_key[k][seed] = v
+    brute_force_data_by_key = defaultdict(dict)
+    for seed, d in brute_force_data.items():
+        for k, v in d.items():
+            brute_force_data_by_key[k][seed] = v
+
+    for key, latex_key in (
+        ("loss", "BruteForceLoss"),
+        ("accuracy", "BruteForceAccuracy"),
+        ("num_correct", "BruteForceNumCorrect"),
+        ("num_incorrect", "BruteForceNumIncorrect"),
+        ("duration", "BruteForceTime"),
+    ):
+        latex_values |= data_summary(brute_force_data_by_key[key], prefix=latex_key)
+        assert all(
+            isinstance(seed, int) for seed in brute_force_data_by_key[key].keys()
+        )
+        latex_all_values_by_value[f"{latex_key}Float"] = brute_force_data_by_key[key]
+
+# %%
+# @torch.no_grad()
+# def single_batch_instruction_count(
+#     model: HookedTransformer, batch_size: int
+# ) -> Tuple[InstructionCount, PerfCounter]:
+#     with PerfCollector() as collector:
+#         if PERF_WORKING:
+#             _run_batch_loss_accuracy(0, batch_size, return_incorrect_sequences=False)
+#     perf_instruction_count = collector.counters
+
+#     with CountTensorOperations() as result:
+#         batch = CountTensor.from_numpy(all_tokens_dataset[:batch_size])
+#         size = batch.shape[0]
+#         labels: CountTensor = training_wrapper.config.experiment.get_ground_truth(batch)  # type: ignore
+#         xs, ys = batch, labels
+#         y_preds: CountTensor = CountHookedTransformer(model)(xs)
+#         loss: CountTensor = training_wrapper.loss_fn(
+#             y_preds, ys, log_softmax=CountTensor.log_softmax  # type: ignore
+#         )  # type: ignore
+#         full_accuracy: CountTensor = training_wrapper.acc_fn_per_seq(y_preds, ys)  # type: ignore
+#         accuracy: CountTensor = full_accuracy.float().mean()
+
+#     return result, perf_instruction_count
 
 
-for key, latex_key in (
-    ("loss", "BruteForceLoss"),
-    ("accuracy", "BruteForceAccuracy"),
-    ("num_correct", "BruteForceNumCorrect"),
-    ("num_incorrect", "BruteForceNumIncorrect"),
-    ("duration", "BruteForceTime"),
-):
-    latex_values |= data_summary(brute_force_data_by_key[key], prefix=latex_key)
-    assert all(isinstance(seed, int) for seed in brute_force_data_by_key[key].keys())
-    latex_all_values_by_value[f"{latex_key}Float"] = brute_force_data_by_key[key]
+# def brute_force_instruction_count(
+#     model: HookedTransformer, batch_size: int
+# ) -> Tuple[InstructionCount, PerfCounter]:
+#     n_full_batches = len(all_tokens_dataset) // batch_size
+#     final_batch_size = len(all_tokens_dataset) % batch_size
+#     single_batch, single_batch_perf = single_batch_instruction_count(model, batch_size)
+#     result = single_batch * n_full_batches
+#     result_perf = single_batch_perf * n_full_batches
+#     if final_batch_size != 0:
+#         final_batch, final_batch_perf = single_batch_instruction_count(
+#             model, final_batch_size
+#         )
+#         result += final_batch
+#         result_perf += final_batch_perf
+#     return result, result_perf
+
+
+# brute_force_count, brute_force_perf = brute_force_instruction_count(model, batch_size)
+# latex_values |= latex_values_of_instruction_count("BruteForce", brute_force_count)
+# latex_values |= latex_values_of_counter("BruteForce", brute_force_perf)
 
 # %% [markdown]
 # # Ablations
 # %%
-ablation_data = {}
+if INCLUDE_BRUTE_FORCE:
+    ablation_data = {}
 
+    def get_ablation_for(seed: int, *, pbar: tqdm):
+        cfg = cfgs[seed]
+        cfg_hash = cfg_hashes[seed]
+        cfg_hash_for_filename = cfg_hashes_for_filename[seed]
+        runtime, model = runtime_models[seed]
 
-def get_ablation_for(seed: int, *, pbar: tqdm):
-    cfg = cfgs[seed]
-    cfg_hash = cfg_hashes[seed]
-    cfg_hash_for_filename = cfg_hashes_for_filename[seed]
-    runtime, model = runtime_models[seed]
-
-    with memoshelve(
-        partial(compute_ablations, model, pbar=pbar),
-        filename=cache_dir
-        / f"{SHARED_CACHE_STEM}.compute_ablations-{cfg_hash_for_filename}",
-        get_hash=get_hash_ascii,
-        get_hash_mem=str,
-    )() as memo_compute_ablations:
-        ablation_results, ablation_time = memo_compute_ablations()
-    return latexify_ablation_results(ablation_results, float_postfix="", int_postfix="")
-
-
-def _handle_ablation_for(seed: int, *, seed_pbar: tqdm, pbar: tqdm):
-    try:
-        seed_pbar.set_postfix(dict(seed=seed))
-        seed_pbar.update(1)
-        ablation_data[seed] = get_ablation_for(seed, pbar=pbar)
-    except Exception as e:
-        print(f"Error computing ablation for seed {seed}: {e}")
-        traceback.print_exc()
-
-
-all_d_vocabs = [model.cfg.d_vocab for _runtime, model in runtime_models.values()]
-assert len(set(all_d_vocabs)) == 1, f"Multiple d_vocabs: {all_d_vocabs}"
-
-with tqdm(
-    total=len(all_d_vocabs),
-    desc="seeds for ablations",
-    position=0,
-) as seed_pbar:
-    with tqdm(
-        total=sum(all_d_vocabs),
-        desc="batches for ablations",
-        position=1,
-    ) as pbar:
-        # with PeriodicGarbageCollector(60):
-        maybe_parallel_map(
-            partial(_handle_ablation_for, seed_pbar=seed_pbar, pbar=pbar),
-            sorted(all_seeds),
+        with memoshelve(
+            partial(compute_ablations, model, pbar=pbar),
+            filename=cache_dir
+            / f"{SHARED_CACHE_STEM}.compute_ablations-{cfg_hash_for_filename}",
+            get_hash=get_hash_ascii,
+            get_hash_mem=str,
+        )() as memo_compute_ablations:
+            ablation_results, ablation_time = memo_compute_ablations()
+        return latexify_ablation_results(
+            ablation_results, float_postfix="", int_postfix=""
         )
-# %%
-ablation_data_by_key = defaultdict(dict)
-for seed, d in ablation_data.items():
-    for k, v in d.items():
-        ablation_data_by_key[k][seed] = v
 
-for key, values in ablation_data_by_key.items():
-    latex_values |= data_summary(values, prefix=key)
-    assert all(isinstance(seed, int) for seed in values.keys())
-    latex_all_values_by_value[f"{key}Float"] = values
+    def _handle_ablation_for(seed: int, *, seed_pbar: tqdm, pbar: tqdm):
+        try:
+            seed_pbar.set_postfix(dict(seed=seed))
+            seed_pbar.update(1)
+            ablation_data[seed] = get_ablation_for(seed, pbar=pbar)
+        except Exception as e:
+            print(f"Error computing ablation for seed {seed}: {e}")
+            traceback.print_exc()
+
+    all_d_vocabs = [model.cfg.d_vocab for _runtime, model in runtime_models.values()]
+    assert len(set(all_d_vocabs)) == 1, f"Multiple d_vocabs: {all_d_vocabs}"
+
+    with tqdm(
+        total=len(all_d_vocabs),
+        desc="seeds for ablations",
+        position=0,
+    ) as seed_pbar:
+        with tqdm(
+            total=sum(all_d_vocabs),
+            desc="batches for ablations",
+            position=1,
+        ) as pbar:
+            # with PeriodicGarbageCollector(60):
+            maybe_parallel_map(
+                partial(_handle_ablation_for, seed_pbar=seed_pbar, pbar=pbar),
+                sorted(all_seeds),
+            )
+# %%
+if INCLUDE_BRUTE_FORCE:
+    ablation_data_by_key = defaultdict(dict)
+    for seed, d in ablation_data.items():
+        for k, v in d.items():
+            ablation_data_by_key[k][seed] = v
+
+    for key, values in ablation_data_by_key.items():
+        latex_values |= data_summary(values, prefix=key)
+        assert all(isinstance(seed, int) for seed in values.keys())
+        latex_all_values_by_value[f"{key}Float"] = values
+
 
 # %% [markdown]
 # # Cubic proof
@@ -799,12 +906,17 @@ def get_cubic_row(seed: int, *, pbar: tqdm) -> dict:
     return {
         "seed": seed,
         "accuracy-bound": cubic_proof_results["accuracy_lower_bound"],
-        "normalized-accuracy-bound": cubic_proof_results["accuracy_lower_bound"]
-        / brute_force_data_by_key["accuracy"][seed],
         "correct-count-lower-bound": cubic_proof_results["correct_count_lower_bound"],
         "duration-proof-search": duration_proof_search,
         "duration": cubic_proof_results["prooftime"],
-    }
+    } | (
+        {
+            "normalized-accuracy-bound": cubic_proof_results["accuracy_lower_bound"]
+            / brute_force_data_by_key["accuracy"][seed],
+        }
+        if INCLUDE_BRUTE_FORCE
+        else {}
+    )
 
 
 def _handle_cubic(seed: int, *, pbar: tqdm):
@@ -821,7 +933,7 @@ total_batches = sum(k * (k + 1) * (k * 2 + 1) // 6 for k in ks)
 with tqdm(total=total_batches, desc="batches for cubic", position=0) as pbar:
     # with PeriodicGarbageCollector(60):
     maybe_parallel_map(partial(_handle_cubic, pbar=pbar), sorted(relevant_seeds))
-update_csv(CUBIC_CSV_PATH, cubic_data, columns=cubic_columns)
+all_cubic_data = update_csv(CUBIC_CSV_PATH, cubic_data, columns=cubic_columns)
 
 # %% [markdown]
 # Summary satistics cubic
@@ -837,9 +949,12 @@ assert len(cubic_data) == len(
 for key, latex_key in (
     # ("loss", "CubicLoss"),
     ("accuracy-bound", "CubicAccuracy"),
-    ("normalized-accuracy-bound", "CubicNormalizedAccuracy"),
     ("correct-count-lower-bound", "CubicCorrectCount"),
     ("duration", "CubicProofTime"),
+) + (
+    (("normalized-accuracy-bound", "NormalizedAccuracy"),)
+    if INCLUDE_BRUTE_FORCE
+    else ()
 ):
     latex_values |= data_summary(cubic_data_by_key[key], prefix=latex_key)
     assert all(isinstance(seed, int) for seed in cubic_data_by_key[key].keys())
@@ -1029,7 +1144,7 @@ for k, v in EQKE_SVD_analyses_by_key.items():
         assert len(vals) == 1, f"Too many values for {k}: {vals}"
         latex_values[k] = list(vals)[0]
 
-update_csv_with_rows(
+all_subcubic_analysis_data = update_csv_with_rows(
     SUBCUBIC_ANALYSIS_CSV_PATH,
     new_data,
     columns=["seed"] + list(EQKE_SVD_analyses_by_key.keys()),
@@ -1380,7 +1495,9 @@ def _subcubic_count_verify_proof(
 
 
 # %%
-_some_runtime, some_model = runtime_models[123]
+_some_runtime, some_model = runtime_models[
+    SELECTED_SEED if SELECTED_SEED in all_seeds else list(sorted(all_seeds))[0]
+]
 d_vocab, n_ctx = some_model.cfg.d_vocab, some_model.cfg.n_ctx
 latex_values["BruteForceEffectiveDimensionalityEstimate"] = brute_force_ed = (
     d_vocab ** (n_ctx + 1)
@@ -1714,27 +1831,36 @@ def try_all_proofs_subcubic(
                 analyze_gaps(tricks)
             )
 
-        row = {
-            "seed": seed,
-            "accuracy-bound": accuracy_bound,
-            "normalized-accuracy-bound": accuracy_bound
-            / brute_force_data_by_key["accuracy"][seed],
-            "duration-proof-search": proof_search_duration,
-            "duration": prooftime,
-            "tricks": tricks.short_description(latex=True),
-            "err-upper-bound": err_upper_bound_value,
-            "err-upper-bound-is-max": err_upper_bound_is_max,
-            "total-sequences": total_sequences,
-            "dropped-sequences": left_behind,
-            "dropped-sequences-frac": left_behind / total_sequences,
-            "most-gap-below-value": most_below_value,
-            "most-gap-below-value-frac": frac_below,
-            "most-gap-below-value-num-std": num_std,
-            "max-gap": v.max().item(),
-            "proof-flop-estimate": subcubic_instruction_count.flop,
-            "proof-int-op-estimate": subcubic_instruction_count.int_op,
-            "proof-branch-estimate": subcubic_instruction_count.branch,
-        } | perf_results
+        row = (
+            {
+                "seed": seed,
+                "accuracy-bound": accuracy_bound,
+                "duration-proof-search": proof_search_duration,
+                "duration": prooftime,
+                "tricks": tricks.short_description(latex=True),
+                "err-upper-bound": err_upper_bound_value,
+                "err-upper-bound-is-max": err_upper_bound_is_max,
+                "total-sequences": total_sequences,
+                "dropped-sequences": left_behind,
+                "dropped-sequences-frac": left_behind / total_sequences,
+                "most-gap-below-value": most_below_value,
+                "most-gap-below-value-frac": frac_below,
+                "most-gap-below-value-num-std": num_std,
+                "max-gap": v.max().item(),
+                "proof-flop-estimate": subcubic_instruction_count.flop,
+                "proof-int-op-estimate": subcubic_instruction_count.int_op,
+                "proof-branch-estimate": subcubic_instruction_count.branch,
+            }
+            | perf_results
+            | (
+                {
+                    "normalized-accuracy-bound": accuracy_bound
+                    / brute_force_data_by_key["accuracy"][seed],
+                }
+                if INCLUDE_BRUTE_FORCE
+                else {}
+            )
+        )
 
         rows.append(row)
         proof_pbar.update(1)
@@ -1821,7 +1947,7 @@ new_data = []
 for seed in sorted(subcubic_data.keys()):
     new_data.extend(subcubic_data[seed])
 
-update_csv_with_rows(
+all_subcubic_data = update_csv_with_rows(
     SUBCUBIC_CSV_PATH, new_data, columns=subcubic_columns, subset=["seed", "tricks"]
 )
 
@@ -1991,6 +2117,604 @@ for seed, rows in subcubic_data.items():
                 latex_all_values_by_value[f"{row['tricks']}{latex_key}Float"][seed] = (
                     row[key]
                 )
+# %%
+# Approximating effective dimensionality
+# %%
+# if INCLUDE_BRUTE_FORCE:
+#     brute_force_df = all_brute_force_data
+#     brute_force_ext_df = brute_force_df.copy()
+#     assert "BruteForceInstructionCount" in latex_values:
+#         # print("Warning: falling back on old value for BruteForceInstructionCount")
+#     # brute_force_ext_df["proof-flop-estimate"] = latex_values.get(
+#     #     "BruteForceInstructionCount", 876123000832
+#     # )
+#     brute_force_ext_df["proof-flop-estimate"] = latex_values[
+#         "BruteForceInstructionCount"]
+#     brute_force_ext_df["normalized-accuracy-bound"] = (
+#         brute_force_ext_df["accuracy"] / brute_force_ext_df["accuracy"]
+#     )
+#     brute_force_ext_df["accuracy-bound"] = brute_force_ext_df["accuracy"]
+#     brute_force_ext_df["group"] = "brute-force"
+#     brute_force_ext_df["effective-dimension-estimate"] = brute_force_ed
+#     brute_force_ext_df["leading-complexity"] = "brute-force"
+#     brute_force_ext_df["tricks"] = ""
+
+# cubic_df = all_cubic_data
+# subcubic_df = all_subcubic_data
+
+# cubic_ext_df = cubic_df.merge(brute_force_df[["seed", "accuracy"]], on="seed")
+# if "CubicInstructionCount" not in latex_values:
+#     print("Warning: falling back on old value for CubicInstructionCount")
+# cubic_ext_df["proof-flop-estimate"] = latex_values.get(
+#     "CubicInstructionCount", 35181664
+# )
+# cubic_ext_df["normalized-accuracy-bound"] = (
+#     cubic_ext_df["accuracy-bound"] / cubic_ext_df["accuracy"]
+# )
+# cubic_ext_df["group"] = "cubic"
+# cubic_ext_df["leading-complexity"] = "cubic"
+# cubic_ext_df["effective-dimension-estimate"] = cubic_ed
+# cubic_ext_df["tricks"] = ""
+
+# subcubic_PVOU_cost = d_vocab
+# subcubic_EPQKP_cost = 0
+
+# subcubic_ext_df = subcubic_df.merge(brute_force_df[["seed", "accuracy"]], on="seed")
+# subcubic_ext_df["normalized-accuracy-bound"] = (
+#     subcubic_ext_df["accuracy-bound"] / subcubic_ext_df["accuracy"]
+# )
+# warned = False
+
+# @cache
+# def parse_tricks_legacy(tricks):
+#     if tricks.startswith("ExactEQKE"):
+#         global warned
+#         if not warned:
+#             print(f"Warning: legacy {tricks}")
+#         warned = True
+#         tricks = tricks[len("ExactEQKE") :]
+#         assert tricks.endswith("AttnErrMaxDiffExact"), tricks
+#         tricks = (
+#             tricks[: -len("AttnErrMaxDiffExact")] + "AttnErrExactEqkeMaxDiffExact"
+#         )
+#     return LargestWrongLogitQuadraticConfig.parse(tricks, latex=True)
+
+# def subcubic_approx_effective_dimension(row, df):
+#     _, model = runtime_models[row["seed"]]
+#     tricks = parse_tricks_legacy(row["tricks"])
+#     return (
+#         int(tricks.effective_dimension_estimate(model.cfg))
+#         + subcubic_PVOU_cost
+#         + subcubic_EPQKP_cost
+#         + EVOU_cost
+#     )
+
+# def leading_complexity(row, df):
+#     tricks = parse_tricks_legacy(row["tricks"])
+#     return (
+#         "almost-quadratic"
+#         if tricks.is_quadratic
+#         else (
+#             "vocab-model-squared"
+#             if tricks.is_subcubic_no_quadratic_vocab
+#             else "subcubic" if tricks.is_subcubic else "fake-cubic"
+#         )
+#     )
+
+# def subcubic_group(row, df):
+#     tricks = parse_tricks_legacy(row["tricks"])
+#     EUPU_str = (
+#         "direct-quadratic"
+#         if tricks.EUPU_handling_quadratic
+#         else (
+#             "direct-vocab-model-squared"
+#             if tricks.EUPU_handling_subcubic_no_quadratic_vocab
+#             else None if tricks.EUPU_handling_subcubic else "direct-cubic"
+#         )
+#     )
+#     EPQKE_str = (
+#         "attention-quadratic"
+#         if tricks.attention_error_handling_quadratic
+#         and tricks.attention_handling_quadratic
+#         else (
+#             "attention-vocab-model-squared"
+#             if tricks.attention_error_handling_subcubic_no_quadratic_vocab
+#             and tricks.attention_handling_subcubic_no_quadratic_vocab
+#             else (
+#                 None
+#                 if tricks.attention_error_handling_subcubic
+#                 and tricks.attention_handling_subcubic
+#                 else "attention-cubic-reference"
+#             )
+#         )
+#     )
+#     strs = [s for s in (EPQKE_str, EUPU_str) if s is not None]
+#     return "subcubic" + (f" ({', '.join(strs)})" if strs else "")
+
+# subcubic_ext_df["group"] = subcubic_ext_df.apply(
+#     subcubic_group, args=(subcubic_ext_df,), axis=1
+# )
+# subcubic_ext_df["effective-dimension-estimate"] = subcubic_ext_df.apply(
+#     subcubic_approx_effective_dimension, args=(subcubic_ext_df,), axis=1
+# )
+# subcubic_ext_df["leading-complexity"] = subcubic_ext_df.apply(
+#     leading_complexity, args=(subcubic_ext_df,), axis=1
+# )
+
+# # Combine all data into a single DataFrame
+# combined_df = pd.concat(
+#     [
+#         subcubic_ext_df[
+#             [
+#                 "proof-flop-estimate",
+#                 "normalized-accuracy-bound",
+#                 "accuracy-bound",
+#                 "seed",
+#                 "effective-dimension-estimate",
+#                 "leading-complexity",
+#                 "group",
+#                 "tricks",
+#             ]
+#         ],
+#         brute_force_ext_df[
+#             [
+#                 "proof-flop-estimate",
+#                 "normalized-accuracy-bound",
+#                 "accuracy-bound",
+#                 "seed",
+#                 "effective-dimension-estimate",
+#                 "leading-complexity",
+#                 "group",
+#                 "tricks",
+#             ]
+#         ],
+#         cubic_ext_df[
+#             [
+#                 "proof-flop-estimate",
+#                 "normalized-accuracy-bound",
+#                 "accuracy-bound",
+#                 "seed",
+#                 "effective-dimension-estimate",
+#                 "leading-complexity",
+#                 "group",
+#                 "tricks",
+#             ]
+#         ],
+#     ],
+#     ignore_index=True,
+# )
+
+# def is_frontier(row, df):
+#     seed_group = df[df["seed"] == row["seed"]]
+#     for _, other in seed_group.iterrows():
+#         if (
+#             other["normalized-accuracy-bound"] > row["normalized-accuracy-bound"]
+#             and other["proof-flop-estimate"] < row["proof-flop-estimate"]
+#         ):
+#             return False
+#     return True
+
+# combined_df["frontier"] = combined_df.apply(
+#     is_frontier, args=(combined_df,), axis=1
+# )
+
+
+# # %%
+# def double_singleton_groups(data: pd.DataFrame, column: str) -> pd.DataFrame:
+#     # hack around https://github.com/nschloe/tikzplotlib/issues/594
+#     group_counts = data[column].value_counts()
+#     single_row_groups = group_counts[group_counts == 1].index
+#     for group in single_row_groups:
+#         single_row = data[data[column] == group]
+#         data = pd.concat([data, single_row], ignore_index=True)
+#     return data
+
+
+# # %%
+
+# # %%
+# if HAS_CSVS:
+#     subcubic_sing_df = subcubic_ext_df.merge(
+#         subcubic_analysis_df[["seed", "EQKERatioFirstTwoSingularFloat"]], on="seed"
+#     )[["seed", "normalized-accuracy-bound", "tricks", "EQKERatioFirstTwoSingularFloat"]]
+#     tricks = set(subcubic_sing_df["tricks"])
+#     for trick in tricks:
+#         if "AttnErrExactEqke" in trick:
+#             subcubic_sing_df = subcubic_sing_df[subcubic_sing_df["tricks"] != trick]
+#     subcubic_sing_df["attention_error_handling"] = subcubic_sing_df.apply(
+#         (
+#             lambda row: LargestWrongLogitQuadraticConfig.parse(
+#                 row["tricks"], latex=True
+#             ).attention_error_handling.replace("_", "-")
+#         ),
+#         axis=1,
+#     )
+#     subcubic_sing_df["attention_handling"] = subcubic_sing_df.apply(
+#         (
+#             lambda row: LargestWrongLogitQuadraticConfig.parse(
+#                 row["tricks"], latex=True
+#             ).attention_handling.replace("_", "-")
+#         ),
+#         axis=1,
+#     )
+#     subcubic_sing_df["EUPU_handling"] = subcubic_sing_df.apply(
+#         (
+#             lambda row: LargestWrongLogitQuadraticConfig.parse(
+#                 row["tricks"], latex=True
+#             ).EUPU_handling.replace("_", "-")
+#         ),
+#         axis=1,
+#     )
+#     subcubic_sing_df = subcubic_sing_df.loc[
+#         subcubic_sing_df.groupby(["seed", "attention_error_handling"])[
+#             "normalized-accuracy-bound"
+#         ].idxmax()
+#     ]
+#     data = subcubic_sing_df[
+#         [
+#             "normalized-accuracy-bound",
+#             "EQKERatioFirstTwoSingularFloat",
+#             "attention_error_handling",
+#         ]
+#     ]
+#     data = double_singleton_groups(
+#         data.drop_duplicates(), column="attention_error_handling"
+#     )
+#     if DISPLAY_PLOTS:
+#         fig = px.scatter(
+#             data,
+#             y="normalized-accuracy-bound",
+#             x="EQKERatioFirstTwoSingularFloat",
+#             color="attention_error_handling",
+#             title="Normalized Accuracy Bound vs EQKE Ratio First Two Singular",
+#             labels={
+#                 "normalized-accuracy-bound": "Normalized Accuracy Bound",
+#                 "EQKERatioFirstTwoSingularFloat": "EQKE Ratio First Two Singular",
+#             },
+#         )
+#         # fig.update_layout(showlegend=False)
+#         fig.update_layout(
+#             legend=dict(orientation="h", yanchor="top", y=-0.3, xanchor="center", x=0.5)
+#         )
+#         # Show the plot
+#         fig.show("png")
+# # %%
+# # plt.set_prop_cycle(color=['red', 'green', 'blue'])
+# # default_colors
+# # cycler(color=plt.cm.Paired.colors)
+# # cycler(color=plt.cm.tab20c.colors)
+# # %%
+# plt.rcParams["axes.prop_cycle"] = cycler(color=plt.cm.Paired.colors[::-1])
+# if HAS_CSVS:
+#     subcubic_sing_df = subcubic_ext_df.merge(
+#         subcubic_analysis_df[["seed", "EQKERatioFirstTwoSingularFloat"]], on="seed"
+#     )[["seed", "normalized-accuracy-bound", "tricks", "EQKERatioFirstTwoSingularFloat"]]
+#     subcubic_sing_df["attention_error_handling"] = subcubic_sing_df.apply(
+#         (
+#             lambda row: LargestWrongLogitQuadraticConfig.parse(
+#                 row["tricks"], latex=True
+#             ).attention_error_handling.replace("_", "-")
+#         ),
+#         axis=1,
+#     )
+#     subcubic_sing_df["attention_handling"] = subcubic_sing_df.apply(
+#         (
+#             lambda row: LargestWrongLogitQuadraticConfig.parse(
+#                 row["tricks"], latex=True
+#             ).attention_handling.replace("_", "-")
+#         ),
+#         axis=1,
+#     )
+#     subcubic_sing_df["EUPU_handling"] = subcubic_sing_df.apply(
+#         (
+#             lambda row: LargestWrongLogitQuadraticConfig.parse(
+#                 row["tricks"], latex=True
+#             ).EUPU_handling.replace("_", "-")
+#         ),
+#         axis=1,
+#     )
+#     tricks = set(subcubic_sing_df["tricks"])
+#     for trick in tricks:
+#         if (
+#             "exact_EQKE"
+#             in LargestWrongLogitQuadraticConfig.parse(
+#                 trick, latex=True
+#             ).attention_error_handling
+#         ):
+#             subcubic_sing_df = subcubic_sing_df[subcubic_sing_df["tricks"] != trick]
+
+#     # subcubic_sing_df = subcubic_sing_df.loc[
+#     #     subcubic_sing_df.groupby(["seed", "attention_error_handling"])[
+#     #         "normalized-accuracy-bound"
+#     #     ].idxmax()
+#     # ]
+
+#     for best_bound_only in (True, False):
+#         df = subcubic_sing_df.copy()
+#         if best_bound_only:
+#             print(f"len before: {len(df)}")
+#             df = df.loc[
+#                 df.groupby(["seed", "attention_error_handling"])[
+#                     "normalized-accuracy-bound"
+#                 ].idxmax()
+#             ]
+#             print(f"len after: {len(df)}")
+
+#         # Group by 'attention_error_handling' and calculate the max 'normalized-accuracy-bound' for sorting groups
+#         df = df[
+#             [
+#                 "normalized-accuracy-bound",
+#                 "EQKERatioFirstTwoSingularFloat",
+#                 "attention_error_handling",
+#             ]
+#         ].sort_values(
+#             by=[
+#                 "attention_error_handling",
+#                 "normalized-accuracy-bound",
+#                 "EQKERatioFirstTwoSingularFloat",
+#             ]
+#         )
+#         # Group by 'attention_error_handling' and calculate the max 'normalized-accuracy-bound' for each group
+#         max_bound_by_group = df.groupby("attention_error_handling")[
+#             "normalized-accuracy-bound"
+#         ].max()
+
+#         # Sort the groups by max 'normalized-accuracy-bound'
+#         sorted_groups = max_bound_by_group.sort_values(ascending=False)
+
+#         # Extract the sorted list of 'attention_error_handling' categories
+#         sorted_attn_err_handling = sorted_groups.index.tolist()
+
+#         key = f"NormalizedAccuracyBound{'AllSecondaryTricks' if not best_bound_only else ''}VsEPQKESingularRatio"
+#         latex_externalize_tables[key] = True
+#         df = double_singleton_groups(
+#             df.drop_duplicates(), column="attention_error_handling"
+#         )
+#         latex_figures[key] = fig = scatter(
+#             df,
+#             yrange=(0, 1),
+#             y="normalized-accuracy-bound",
+#             x="EQKERatioFirstTwoSingularFloat",
+#             color="attention_error_handling",
+#             # title='Normalized Accuracy Bound vs EQKE Ratio First Two Singular',
+#             yaxis="Normalized Accuracy Bound",
+#             xaxis=r"EPQKE Singular Ratio: $\sigma_1 / \sigma_2$",
+#             # labels={
+#             #     'normalized-accuracy-bound': 'Normalized Accuracy Bound',
+#             #     'EQKERatioFirstTwoSingularFloat': 'EQKE Ratio First Two Singular'
+#             # }
+#             color_order=sorted_attn_err_handling,
+#             renderer=RENDERER,
+#             plot_with=PLOT_WITH,
+#             show=DISPLAY_PLOTS,
+#             # plot_with="plotly"
+#         )
+#         # fig.update_layout(showlegend=False)
+#         # fig.update_layout(
+#         #     legend=dict(
+#         #         orientation="h",
+#         #         yanchor="top",
+#         #         y=-0.3,
+#         #         xanchor="center",
+#         #         x=0.5
+#         #     )
+#         # )
+#         # # Show the plot
+#         # fig.show()
+
+
+# # %%
+# if HAS_CSVS:
+#     for descr, df in (
+#         (
+#             "all subcubic",
+#             subcubic_ext_df[subcubic_ext_df["leading-complexity"] != "fake-cubic"][
+#                 "proof-flop-estimate"
+#             ],
+#         ),
+#         (
+#             "mainly subcubic",
+#             subcubic_ext_df[subcubic_ext_df["leading-complexity"] == "subcubic"][
+#                 "proof-flop-estimate"
+#             ],
+#         ),
+#         (
+#             "almost quadratic",
+#             subcubic_ext_df[
+#                 subcubic_ext_df["leading-complexity"] == "almost-quadratic"
+#             ]["proof-flop-estimate"],
+#         ),
+#     ):
+#         prekey = (
+#             f"ProofFlopEstimate{''.join([s.capitalize() for s in descr.split(' ')])}"
+#         )
+#         latex_values[f"{prekey}Mean"] = df.mean()
+#         latex_values[f"{prekey}StdDev"] = df.std()
+#         print(f"{descr}: {pm_mean_std(df)}")
+# # %%
+# if HAS_CSVS:
+#     df_sorted = combined_df.sort_values(by="normalized-accuracy-bound", ascending=False)
+#     category_order = df_sorted["group"].unique().tolist()
+#     category_name_remap = {
+#         "brute-force": f"brute force (acc: {pm_mean_std(brute_force_df['accuracy'])})",
+#         "cubic": f"cubic (rel acc: {pm_mean_std(cubic_ext_df['normalized-accuracy-bound'])})",
+#     }
+#     category_name_remap_short = {
+#         "brute-force": f"brute force",
+#         "cubic": f"cubic",
+#     }
+#     max_rows = subcubic_ext_df.loc[
+#         subcubic_ext_df.groupby(["seed", "group"])["normalized-accuracy-bound"].idxmax()
+#     ]
+#     result = (
+#         max_rows.groupby("group")["normalized-accuracy-bound"]
+#         .agg(["mean", "std"])
+#         .reset_index()
+#     )
+#     for group_name in category_order:
+#         if group_name not in category_name_remap:
+#             avg, std = result[result["group"] == group_name][["mean", "std"]].iloc[0]
+#             new_group_name = group_name[len("subcubic (") : -1]
+#             new_group_name = "subcubic" if not new_group_name else new_group_name
+#             new_group_name = new_group_name.replace(
+#                 "vocab-model-squared", r"$d_{\mathrm{vocab}}d_{\mathrm{model}}^2$"
+#             )
+#             category_name_remap[group_name] = (
+#                 f"{new_group_name} (rel acc: {pm_round(avg, std)})"
+#             )
+#             category_name_remap_short[group_name] = new_group_name
+
+
+# # PLOT_WITH = "matplotlib"
+# # %%
+# plt.rcParams["axes.prop_cycle"] = cycler(color=plt.cm.Paired.colors)
+# if HAS_CSVS:
+#     latex_externalize_tables["EffectiveDimensionVsFLOP"] = True
+#     data = combined_df[
+#         ["proof-flop-estimate", "effective-dimension-estimate", "group"]
+#     ].copy()
+#     data = double_singleton_groups(data.drop_duplicates(), column="group")
+#     data = data.sort_values(
+#         by=["group", "proof-flop-estimate", "effective-dimension-estimate"]
+#     )
+#     data["group"] = data["group"].map(category_name_remap_short)
+#     latex_externalize_tables["EffectiveDimensionVsFLOP"] = True
+#     latex_figures["EffectiveDimensionVsFLOP"] = fig = scatter(
+#         data,
+#         x="proof-flop-estimate",
+#         y="effective-dimension-estimate",
+#         color="group",
+#         title="",
+#         log_x=2,
+#         log_y=2,
+#         reverse_xaxis=False,
+#         color_order=[category_name_remap_short[c] for c in category_order],
+#         xaxis="FLOPs to Verify Proof (approximate)",
+#         yaxis="Unexplained Dimension (Estimated)",
+#         plot_with=PLOT_WITH,
+#         renderer=RENDERER,
+#         show=DISPLAY_PLOTS,
+#     )
+#     latex_externalize_tables["EffectiveDimensionVsFLOPDiscontinuousXY"] = True
+#     latex_figures["EffectiveDimensionVsFLOPDiscontinuousXY"] = fig = scatter(
+#         data,
+#         x="proof-flop-estimate",
+#         y="effective-dimension-estimate",
+#         color="group",
+#         title="",
+#         log_x=2,
+#         log_y=2,
+#         reverse_xaxis=False,
+#         color_order=[category_name_remap_short[c] for c in category_order],
+#         xaxis="FLOPs to Verify Proof (approximate)",
+#         yaxis="Unexplained Dimension (Estimated)",
+#         discontinuous_x=(
+#             data[(data["group"] == "brute force") | (data["group"] == "cubic")][
+#                 "proof-flop-estimate"
+#             ].mean(),
+#         ),
+#         discontinuous_y=(
+#             data[(data["group"] == "brute force") | (data["group"] == "cubic")][
+#                 "effective-dimension-estimate"
+#             ].mean(),
+#         ),
+#         plot_with=PLOT_WITH,
+#         renderer=RENDERER,
+#         show=DISPLAY_PLOTS,
+#     )
+
+
+# # %%
+# plt.rcParams["axes.prop_cycle"] = cycler(color=plt.cm.Paired.colors)
+# if HAS_CSVS:
+#     for frontier_only in (True, False):
+#         for norm, normt in (("", ""), ("normalized-", "Normalized ")):
+#             key = f"{normt.strip()}AccuracyBoundVsFLOPs{'FrontierOnly' if frontier_only else ''}"
+#             data = (
+#                 combined_df[combined_df["frontier"] == True]
+#                 if frontier_only
+#                 else combined_df
+#             )
+#             data = data[
+#                 ["proof-flop-estimate", f"{norm}accuracy-bound", "group"]
+#             ].copy()
+#             data = double_singleton_groups(data.drop_duplicates(), column="group")
+#             data = data.sort_values(
+#                 by=["group", f"{norm}accuracy-bound", "proof-flop-estimate"]
+#             )
+#             discontinuous_x = (
+#                 data[(data["group"] == "brute force") | (data["group"] == "cubic")][
+#                     "proof-flop-estimate"
+#                 ].mean(),
+#             )
+#             data["group"] = data["group"].map(category_name_remap)
+#             latex_externalize_tables[key] = True
+#             latex_figures[key] = fig = scatter(
+#                 data,
+#                 x="proof-flop-estimate",
+#                 y=f"{norm}accuracy-bound",
+#                 color="group",
+#                 title="",  # "Pareto Frontier" if frontier_only else "",
+#                 log_x=2,
+#                 reverse_xaxis=False,
+#                 xaxis="FLOPs to Verify Proof (approximate)",
+#                 yaxis=f"{normt}Accuracy Bound",
+#                 color_order=[category_name_remap[c] for c in category_order],
+#                 plot_with=PLOT_WITH,
+#                 renderer=RENDERER,
+#                 show=DISPLAY_PLOTS,
+#             )
+#             latex_externalize_tables[f"{key}DiscontinuousX"] = True
+#             latex_figures[f"{key}DiscontinuousX"] = fig = scatter(
+#                 data,
+#                 x="proof-flop-estimate",
+#                 y=f"{norm}accuracy-bound",
+#                 color="group",
+#                 title="",  # "Pareto Frontier" if frontier_only else "",
+#                 log_x=2,
+#                 reverse_xaxis=False,
+#                 xaxis="FLOPs to Verify Proof (approximate)",
+#                 yaxis=f"{normt}Accuracy Bound",
+#                 color_order=[category_name_remap[c] for c in category_order],
+#                 discontinuous_x=discontinuous_x,
+#                 plot_with=PLOT_WITH,
+#                 renderer=RENDERER,
+#                 show=DISPLAY_PLOTS,
+#             )
+
+
+# # %%
+# if HAS_CSVS:
+#     for norm, normt in (("", ""), ("normalized-", "Normalized ")):
+
+#         data = combined_df[
+#             [
+#                 "proof-flop-estimate",
+#                 f"{norm}accuracy-bound",
+#                 "group",
+#                 "frontier",
+#                 "tricks",
+#             ]
+#         ].copy()
+#         data = double_singleton_groups(data.drop_duplicates(), column="group")
+#         # data["group"] = data["group"].map({k:k[:7] for k in set(data["group"])})
+#         if DISPLAY_PLOTS:
+#             fig = px.scatter(
+#                 data,
+#                 x="proof-flop-estimate",
+#                 y=f"{norm}accuracy-bound",
+#                 symbol="group",
+#                 title=f"Scatter Plot of Proof Flop Estimate vs {normt}Accuracy Bound (Logarithmic X-Axis)",
+#                 log_x=True,
+#                 color="tricks",
+#                 # symbol_map={True: "diamond", False: "circle"},
+#                 # legend=False,
+#             )
+#             fig.update_layout(showlegend=False)
+#             # Flip the x-axis
+#             fig.update_layout(xaxis=dict(autorange="reversed"))
+
+#             fig.show()
 
 # %%
 latex_values["AllModelsHEADSHA"] = git.get_head_sha(short=False)

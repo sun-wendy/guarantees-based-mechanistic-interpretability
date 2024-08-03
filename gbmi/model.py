@@ -1,65 +1,62 @@
 from __future__ import annotations
-from argparse import ArgumentParser, Namespace, BooleanOptionalAction
 
 import datetime
-import logging
 import json
+import logging
 import os
 import re
-from torch import Tensor
-from tqdm.auto import tqdm
 from abc import ABC, abstractmethod
+from argparse import ArgumentParser, BooleanOptionalAction, Namespace
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
-from jaxtyping import Float, Integer
-import re
-from transformer_lens import HookedTransformerConfig
-from transformer_lens.HookedTransformerConfig import SUPPORTED_ACTIVATIONS
-from typing_extensions import override
 from typing import (
     Any,
     Callable,
     Collection,
+    Dict,
+    Generic,
     Iterable,
     List,
-    TypeVar,
-    Generic,
-    Optional,
     Literal,
+    Mapping,
+    Optional,
+    Sequence,
     Tuple,
     Type,
-    Dict,
-    Mapping,
-    Sequence,
+    TypeVar,
     Union,
 )
 
+import lightning.pytorch as pl
+import rich.progress
 import torch
 import wandb
-import wandb.apis.public.runs
 import wandb.apis.public.artifacts
-from wandb.sdk.lib.paths import FilePathStr
-from lightning import LightningModule, LightningDataModule, Trainer, seed_everything
+import wandb.apis.public.runs
+from lightning import LightningDataModule, LightningModule, Trainer, seed_everything
 from lightning.pytorch.callbacks import (
-    RichProgressBar,
-    ModelCheckpoint,
     LearningRateMonitor,
+    ModelCheckpoint,
     RichModelSummary,
+    RichProgressBar,
 )
-import rich.progress
 from pytorch_lightning.loggers import WandbLogger
-from pytorch_lightning import Callback
-import lightning.pytorch as pl
-from transformer_lens import HookedTransformer
-from gbmi.utils.lazy import lazy
+from tqdm.auto import tqdm
+from transformer_lens import HookedTransformer, HookedTransformerConfig
+from transformer_lens.HookedTransformerConfig import SUPPORTED_ACTIVATIONS
+from typing_extensions import override
+from wandb.sdk.lib.paths import FilePathStr
+
 from gbmi.utils import (
-    get_trained_model_dir,
     DEFAULT_WANDB_ENTITY,
     MetricsCallback,
+    get_trained_model_dir,
     handle_size_warnings_and_prompts,
+    to_device,
 )
-from gbmi.utils.hashing import get_hash, _json_dumps, _EXCLUDE
+from gbmi.utils.hashing import _EXCLUDE, _json_dumps, get_hash
+from gbmi.utils.lazy import lazy
 
 ConfigT = TypeVar("ConfigT")
 ExpT = TypeVar("ExpT", bound="ExperimentConfig")
@@ -459,19 +456,30 @@ def _adjust_statedict_to_model(state_dict: Optional[dict]) -> Optional[dict]:
 
 
 def _load_model(
-    config: Config, model_pth_path: Path, wandb_id: Optional[str] = None
+    config: Config,
+    model_pth_path: Path,
+    wandb_id: Optional[str] = None,
+    *,
+    map_location: Optional[str | torch.device] = None,
+    print_details: bool = True,
 ) -> Tuple[RunData, HookedTransformer]:
     model = config.experiment.get_training_wrapper().build_model(config)
+    if map_location is not None:
+        model.to(map_location, print_details=print_details)
+    if not torch.cuda.is_available() and map_location is None:
+        map_location = torch.device("cpu")
     try:
         cached_data = torch.load(
             str(model_pth_path),
-            map_location=torch.device("cpu") if not torch.cuda.is_available() else None,
+            map_location=map_location,
         )
         model.load_state_dict(
             cached_data.get(
                 "model", _adjust_statedict_to_model(cached_data.get("state_dict"))
             )
         )
+        if map_location is not None:
+            model.to(map_location, print_details=print_details)
         wandb_id = cached_data.get("wandb_id", wandb_id)
         # model_checkpoints = cached_data["checkpoints"]
         # checkpoint_epochs = cached_data["checkpoint_epochs"]
@@ -495,18 +503,28 @@ def _load_model(
 
 
 def try_load_model_from_wandb_download(
-    config: Config, model_dir: Union[str, Path]
+    config: Config,
+    model_dir: Union[str, Path],
+    *,
+    map_location: Optional[str | torch.device] = None,
+    print_details: bool = True,
 ) -> Optional[Tuple[RunData, HookedTransformer]]:
     model_dir = Path(model_dir)
     for model_path in list(model_dir.glob("*.pth")) + list(model_dir.glob("*.ckpt")):
-        res = _load_model(config, model_path)
+        res = _load_model(
+            config, model_path, map_location=map_location, print_details=print_details
+        )
         if res is not None:
             return res
     return None
 
 
 def try_load_model_from_wandb(
-    config: Config, wandb_model_path: str
+    config: Config,
+    wandb_model_path: str,
+    *,
+    map_location: Optional[str | torch.device] = None,
+    print_details: bool = True,
 ) -> Optional[Tuple[RunData, HookedTransformer]]:
     # Try loading the model from wandb
     model_dir = None
@@ -517,7 +535,9 @@ def try_load_model_from_wandb(
     except Exception as e:
         logging.warning(f"Could not download model {wandb_model_path} from wandb:\n{e}")
     if model_dir is not None:
-        return try_load_model_from_wandb_download(config, model_dir)
+        return try_load_model_from_wandb_download(
+            config, model_dir, map_location=map_location, print_details=print_details
+        )
     else:
         return None
 
@@ -533,6 +553,9 @@ def train_or_load_model(
     model_description: str = "trained model",  # uploaded to wandba
     accelerator: str = "auto",
     model_version: str = "latest",
+    *,
+    map_location: Optional[str | torch.device] = None,
+    print_details: bool = True,
 ) -> Tuple[RunData, HookedTransformer]:
     """
     Train model, or load from disk / wandb.
@@ -578,11 +601,21 @@ def train_or_load_model(
     if force != "train":
         # Try loading the model locally
         if os.path.exists(model_ckpt_path):
-            res = _load_model(config, model_ckpt_path)
+            res = _load_model(
+                config,
+                model_ckpt_path,
+                map_location=map_location,
+                print_details=print_details,
+            )
             if res is not None:
                 return res
 
-        res2 = try_load_model_from_wandb(config, wandb_model_path)
+        res2 = try_load_model_from_wandb(
+            config,
+            wandb_model_path,
+            map_location=map_location,
+            print_details=print_details,
+        )
         if res2 is not None:
             return res2
 
@@ -722,7 +755,10 @@ def train_or_load_model(
     if run is not None:
         run.finish()
 
-    return (
+    if map_location is not None:
+        wrapped_model.model.to(map_location, print_details=print_details)
+
+    res = (
         RunData(
             wandb_id=wandb_model_path,
             train_metrics=train_metric_callback.metrics,
@@ -730,6 +766,9 @@ def train_or_load_model(
         ),
         wrapped_model.model,
     )
+    if map_location is not None:
+        res = to_device(res, map_location, print_details=print_details)
+    return res
 
 
 def add_force_argument(

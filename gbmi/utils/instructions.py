@@ -33,6 +33,7 @@ from typing import (
 from types import EllipsisType
 import numpy as np
 import torch
+import torch.nn.functional
 from torch import empty as torch_empty  # for stability under hot patching
 from torch import ones as torch_ones  # for stability under hot patching
 from transformer_lens import HookedTransformer
@@ -435,6 +436,8 @@ class CountTensor:
             self.global_count_at_creation = None
         else:
             self.global_count_at_creation = count_to_update.copy()
+        # work around torch.broadcast_shapes not working in cases like like torch.broadcast_shapes((32, 1), (np.int64(32), 32))
+        self.shape = tuple(map(int, self.shape))
 
     def __str__(self):
         return f"CountTensor(shape={self.shape}, count={self.count}, is_bool={self.is_bool}"
@@ -581,7 +584,7 @@ class CountTensor:
             count = InstructionCount(flop=int(np.prod(shape)) - 1)
             add_to_count(count)
             return CountTensor(
-                shape=[],
+                shape=(),
                 count=count,
                 is_bool=is_bool if is_bool is not None else self.is_bool,
                 # parents=CountTensor._parents_of_tuple((self,)),
@@ -752,7 +755,7 @@ class CountTensor:
 
     triu = tril
 
-    def _reshape(self, new_shape: Sequence[int]) -> "CountTensor":
+    def _reshape_unchecked(self, new_shape: Sequence[int]) -> "CountTensor":
         """explicitly does not check the number of elements"""
         return CountTensor(
             shape=new_shape,
@@ -760,7 +763,30 @@ class CountTensor:
             is_bool=self.is_bool,
         )
 
-    def reshape(self, new_shape: Sequence[int]) -> "CountTensor":
+    def _reshape(self, new_shape: Sequence[int]) -> "CountTensor":
+        """explicitly does not check the number of elements"""
+        if any(s == -1 for s in new_shape):
+            nelem = np.prod(self.shape)
+            n_new_elem = np.prod([s for s in new_shape if s != -1])
+            assert (
+                nelem % n_new_elem == 0
+            ), f"Cannot reshape {self.shape} to {new_shape}"
+            assert (
+                new_shape.count(-1) <= 1
+            ), f"Can only specify one unknown dimension in {self}._reshape({new_shape})"
+            new_shape = tuple(
+                s if s != -1 else int(nelem // n_new_elem) for s in new_shape
+            )
+        return self._reshape_unchecked(new_shape)
+
+    def reshape(self, *new_shape: int | Sequence[int]) -> "CountTensor":
+        if len(new_shape) == 1 and hasattr(new_shape[0], "__iter__"):
+            new_shape = new_shape[0]
+        return self._reshape(new_shape)
+
+    def view(self, *new_shape: int | Sequence[int]) -> "CountTensor":
+        if len(new_shape) == 1 and hasattr(new_shape[0], "__iter__"):
+            new_shape = new_shape[0]
         return self._reshape(new_shape)
 
     def expand(self, *sizes: Union[int, Sequence[int]]) -> "CountTensor":
@@ -882,19 +908,31 @@ class CountTensor:
     def flip(self, *args, **kwargs) -> "CountTensor":
         return self.unary()
 
-    def permute(self, *args, **kwargs) -> "CountTensor":
-        return self._reshape(
-            tuple(
-                torch.tensor(self.shape, dtype=torch.long)
-                .permute(*args, **kwargs)
-                .tolist()
-            )
-        )
+    def permute(self, dims) -> "CountTensor":
+        return self._reshape(tuple(self.shape[i] for i in dims))
 
     def transpose(self, dim0: int, dim1: int) -> "CountTensor":
         new_shape = list(self.shape)
         new_shape[dim0], new_shape[dim1] = new_shape[dim1], new_shape[dim0]
         return self._reshape(tuple(new_shape))
+
+    def linear(
+        self,
+        weight: Union["CountTensor", np.ndarray, torch.Tensor],
+        bias: Union["CountTensor", np.ndarray, torch.Tensor],
+    ) -> "CountTensor":
+        return self @ weight.T + bias
+
+    def addmm(
+        self,
+        mat1: Union["CountTensor", np.ndarray, torch.Tensor],
+        mat2: Union["CountTensor", np.ndarray, torch.Tensor],
+        *,
+        alpha=1,
+        beta=1,
+    ) -> "CountTensor":
+        return self + mat1 @ mat2
+        # return beta * input + alpha * mat1 @ mat2
 
     @property
     def T(self) -> "CountTensor":
@@ -1111,7 +1149,7 @@ class CountTensor:
         #     shape = [int(np.ceil((stop - start) / stride))]
         #     return CountTensor(shape=shape, count=self.count)
         # if isinstance(indices, int):
-        #     return CountTensor(shape=[], count=self.count)
+        #     return CountTensor(shape=(), count=self.count)
         # if isinstance(indices, tuple):
         #     t_shapes = [idx.shape[:-1] for idx in indices if isinstance(idx, CountTensor)]
         #     init_shape = torch.broadcast_shapes(*t_shapes)
@@ -1412,6 +1450,9 @@ class CountTensorBackend(
     def is_float_type(self, x):
         return True
 
+    def transpose(self, x, axes):
+        return x.permute(axes)
+
     def reduce(self, x, operation, reduced_axes):
         if operation == "min":
             return x.amin(dim=reduced_axes)
@@ -1489,6 +1530,7 @@ class PatchTorch:
         "cat": True,
         "svd": False,
         "matmul": False,
+        "addmm": False,
     }
     _torch_count_name = {"matmul": "__matmul__"}
     _torch_linalg_is_static = {
@@ -1496,6 +1538,8 @@ class PatchTorch:
         "svd": True,
     }
     _torch_linalg_count_name = {"svd": "linalg_svd"}
+    _torch_nn_functional_is_static = {"linear": False}
+    _torch_nn_functional_name: dict[str, str] = {}
 
     def __init__(self, **kwargs: bool):
         self.torch_patches = tuple(
@@ -1505,6 +1549,11 @@ class PatchTorch:
             name
             for name in PatchTorch._torch_linalg_is_static
             if kwargs.get(f"linalg_{name}", True)
+        )
+        self.torch_nn_functional_patches = tuple(
+            name
+            for name in PatchTorch._torch_nn_functional_is_static
+            if kwargs.get(f"nn_functional_{name}", True)
         )
 
     def __enter__(self):
@@ -1530,12 +1579,25 @@ class PatchTorch:
                     static=PatchTorch._torch_linalg_is_static[name],
                 ),
             )
+        for name in self.torch_nn_functional_patches:
+            setattr(
+                torch.nn.functional,
+                name,
+                DefaultCountTensorWrapper(
+                    torch.nn.functional,
+                    name,
+                    count_name=PatchTorch._torch_nn_functional_name.get(name),
+                    static=PatchTorch._torch_nn_functional_is_static[name],
+                ),
+            )
 
     def __exit__(self, exc_type, exc_value, traceback):
         for name in self.torch_patches:
             getattr(torch, name).unwrap()
         for name in self.torch_linalg_patches:
             getattr(torch.linalg, name).unwrap()
+        for name in self.torch_nn_functional_patches:
+            getattr(torch.nn.functional, name).unwrap()
 
 
 class CountHookedTransformer(HookedTransformer):

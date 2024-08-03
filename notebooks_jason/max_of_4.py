@@ -13,131 +13,111 @@ else:
 # %%
 #!sudo apt-get install dvipng texlive-latex-extra texlive-fonts-recommended cm-super pdfcrop optipng pngcrush
 # %%
-import traceback
-import sys
-import re
-import time
-import subprocess
-from itertools import chain
-from functools import reduce, partial, cache
-from concurrent.futures import ThreadPoolExecutor
 import math
-from scipy import stats
+import re
+import subprocess
+import sys
+import time
+import traceback
+from argparse import ArgumentParser, BooleanOptionalAction
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-import matplotlib.pyplot as plt
-import matplotlib.cm as cm
-import matplotlib.figure
-import tikzplotlib
+from functools import cache, partial
+from itertools import chain
+from pathlib import Path
+from typing import Any, Iterator, Literal, Optional, Tuple, Union
+
 import matplotlib
-from typing import (
-    Literal,
-    Optional,
-    Tuple,
-    Union,
-    Any,
-    Iterator,
-)
-from plotly.subplots import make_subplots
+import matplotlib.figure
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
+import tikzplotlib
+import torch
 from cycler import cycler
-from gbmi.exp_max_of_n.plot import (
-    scatter_attention_difference_vs_gap,
-    hist_attention_difference_over_gap,
-    hist_EVOU_max_minus_diag_logit_diff,
-    make_better_slides_plots_00,
-    display_EQKE_SVD_analysis,
-)
+from jaxtyping import Float, Integer
+from plotly.subplots import make_subplots
+from torch import Tensor
+from tqdm.auto import tqdm
+from transformer_lens import HookedTransformer
+
+import gbmi.exp_max_of_n.analysis.quadratic as analysis_quadratic
+import gbmi.exp_max_of_n.analysis.subcubic as analysis_subcubic
+import gbmi.exp_max_of_n.verification.cubic as cubic
+import gbmi.exp_max_of_n.verification.quadratic as quadratic
+import gbmi.exp_max_of_n.verification.subcubic as subcubic
+import gbmi.utils.ein as ein
+import gbmi.utils.git as git
+import gbmi.utils.images as image_utils
+import gbmi.utils.instructions as instructions
+from gbmi.analysis_tools.decomp import analyze_svd, split_svd_contributions
 from gbmi.analysis_tools.plot import (
-    hist_EVOU_max_logit_diff,
-    weighted_histogram,
     Colorscale,
     combine_interpolate_color_mapping,
-    colorscale_to_cmap,
-    imshow,
+    hist_EVOU_max_logit_diff,
     line,
     remove_titles,
+    scatter,
+    weighted_histogram,
 )
-from gbmi.analysis_tools.decomp import analyze_svd, split_svd_contributions
-from gbmi.analysis_tools.utils import pm_round, pm_mean_std, data_summary
-from gbmi.analysis_tools.plot import scatter
-from gbmi.exp_max_of_n.verification import LargestWrongLogitQuadraticConfig
-from gbmi.utils.dataclass import enumerate_dataclass_values
-from gbmi.utils.lowrank import LowRankTensor
-import gbmi.utils.ein as ein
-import gbmi.utils.images as image_utils
-from gbmi.utils.images import trim_plotly_figure
-from gbmi.utils.memoshelve import memoshelve
+from gbmi.analysis_tools.utils import data_summary, pm_mean_std, pm_round
+from gbmi.exp_max_of_n.analysis import (
+    analyze_EVOU,
+    find_second_singular_contributions,
+    find_size_and_query_direction,
+)
 from gbmi.exp_max_of_n.analysis.ablation import (
     compute_ablations,
     latexify_ablation_results,
 )
-from gbmi.utils.latex_export import (
-    to_latex_defs,
-    latex_values_of_counter,
-    latex_values_of_instruction_count,
+from gbmi.exp_max_of_n.plot import (
+    display_basic_interpretation,
+    display_EQKE_SVD_analysis,
+    hist_attention_difference_over_gap,
+    hist_EVOU_max_minus_diag_logit_diff,
+    make_better_slides_plots_00,
+    scatter_attention_difference_vs_gap,
 )
-from gbmi.exp_max_of_n.analysis import (
-    find_second_singular_contributions,
-    find_size_and_query_direction,
-    analyze_EVOU,
-)
-from gbmi.exp_max_of_n.plot import display_basic_interpretation
 from gbmi.exp_max_of_n.train import (
-    IterableDatasetCfg,
-    MaxOfN,
-    MaxOfNDataModule,
-    MaxOfNTrainingWrapper,
-    train_or_load_model,
     MAX_OF_4_CONFIG,
     SEEDS,
     SELECTED_SEED,
+    MaxOfNDataModule,
+    MaxOfNTrainingWrapper,
+    train_or_load_model,
 )
-from gbmi.model import Config
-import torch
-from tqdm.auto import tqdm
-import numpy as np
-from jaxtyping import Float, Integer
-from torch import Tensor
-import pandas as pd
-import plotly.express as px
-from transformer_lens import HookedTransformerConfig, HookedTransformer
-from pathlib import Path
-from gbmi.utils import default_device, shuffle_tensor
-from gbmi.utils.sequences import (
-    SequenceDataset,
-)
-from gbmi.verification_tools.decomp import (
-    factor_contribution,
-    bound_max_row_diff_by_SVD,
-)
-
-from gbmi.verification_tools.general import EU_PU
-from gbmi.verification_tools.l1h1 import (
-    all_EQKE,
-    all_EQKP,
-    all_EVOU,
-    all_PVOU,
-)
-from gbmi.verification_tools.utils import complexity_of
+from gbmi.exp_max_of_n.verification import LargestWrongLogitQuadraticConfig
+from gbmi.utils import default_device, patch
+from gbmi.utils.dataclass import enumerate_dataclass_values
 from gbmi.utils.hashing import get_hash_ascii
-import gbmi.utils.git as git
-import gbmi.exp_max_of_n.verification.cubic as cubic
-import gbmi.exp_max_of_n.verification.subcubic as subcubic
-import gbmi.exp_max_of_n.verification.quadratic as quadratic
-import gbmi.exp_max_of_n.analysis.quadratic as analysis_quadratic
-import gbmi.exp_max_of_n.analysis.subcubic as analysis_subcubic
-import gbmi.utils.instructions as instructions
+from gbmi.utils.images import trim_plotly_figure
 from gbmi.utils.instructions import (
-    InstructionCount,
-    CountTensor,
-    PatchTorch,
-    CountHookedTransformer,
-    PerfCounter,
-    PerfCollector,
-    CountTensorOperations,
     PERF_WORKING,
+    CountHookedTransformer,
+    CountTensor,
+    CountTensorOperations,
+    InstructionCount,
+    PatchTorch,
+    PerfCollector,
+    PerfCounter,
 )
-
+from gbmi.utils.latex_export import (
+    latex_values_of_counter,
+    latex_values_of_instruction_count,
+    to_latex_defs,
+)
+from gbmi.utils.lowrank import LowRankTensor
+from gbmi.utils.memoshelve import memoshelve
+from gbmi.utils.sequences import SequenceDataset
+from gbmi.verification_tools.decomp import (
+    bound_max_row_diff_by_SVD,
+    factor_contribution,
+)
+from gbmi.verification_tools.general import EU_PU
+from gbmi.verification_tools.l1h1 import all_EQKE, all_EQKP, all_EVOU, all_PVOU
+from gbmi.verification_tools.utils import complexity_of
 
 try:
     import google.colab
@@ -145,10 +125,41 @@ try:
     IN_COLAB = True
 except:
     IN_COLAB = False
-
-
 # %%
-DISPLAY_PLOTS: bool = True  # @param {type:"boolean"}
+
+parser = ArgumentParser()
+parser.add_argument(
+    "--seeds",
+    type=str,
+    default=",".join(sorted(map(str, SEEDS))),
+    help="Comma-separated list of seeds to use",
+)
+parser.add_argument(
+    "--seed",
+    type=str,
+    default=str(SELECTED_SEED),
+    help="The primary seed",
+)
+parser.add_argument(
+    "-j", dest="n_threads", type=int, default=1, help="number of threads"
+)
+parser.add_argument(
+    "--no-perf",
+    action="store_const",
+    const=True,
+    default=None,
+    help="Forcibly disable perf",
+)
+parser.add_argument(
+    "--plots",
+    action=BooleanOptionalAction,
+    default=True,
+    help="Include plots",
+)
+cli_args = parser.parse_args(None if ipython is None else [])
+# %%
+DISPLAY_PLOTS: bool = False if ipython is None else True  # @param {type:"boolean"}
+SAVE_PLOTS: bool = cli_args.plots
 RENDERER: Optional[str] = "png"  # @param ["png", None]
 PLOT_WITH: Literal["plotly", "matplotlib"] = (  # @param ["plotly", "matplotlib"]
     "matplotlib"
@@ -181,7 +192,7 @@ SUBCUBIC_CSV_PATH = ALL_MODELS_PATH / "all-models-subcubic-values.csv"
 SUBCUBIC_CSV_PATH.parent.mkdir(exist_ok=True, parents=True)
 SUBCUBIC_ANALYSIS_CSV_PATH = ALL_MODELS_PATH / "all-models-subcubic-analysis-values.csv"
 SUBCUBIC_ANALYSIS_CSV_PATH.parent.mkdir(exist_ok=True, parents=True)
-N_THREADS: Optional[int] = 2
+N_THREADS: Optional[int] = cli_args.n_threads
 default_colors = plt.rcParams["axes.prop_cycle"]
 matplotlib.rcParams["text.usetex"] = True
 matplotlib.rcParams[
@@ -225,37 +236,47 @@ latex_figures: dict[str, Union[go.Figure, matplotlib.figure.Figure]] = {}
 latex_externalize_tables: dict[str, bool] = {}
 latex_only_externalize_tables: dict[str, bool] = {}
 
-
+# %%
+if cli_args.no_perf:
+    PERF_WORKING = False
 # %%
 # %%
-seeds = sorted(SEEDS) if compute_expensive_average_across_many_models else []
-cfgs = {seed: MAX_OF_4_CONFIG(seed) for seed in [SELECTED_SEED] + list(seeds)}
+selected_seed = int(cli_args.seed)
+seeds = (
+    sorted(set(map(int, cli_args.seeds.split(","))))
+    if compute_expensive_average_across_many_models
+    else []
+)
+seeds = [selected_seed] + [s for s in seeds if s != selected_seed]
+cfgs = {seed: MAX_OF_4_CONFIG(seed) for seed in list(seeds)}
 cfg_hashes = {seed: get_hash_ascii(cfg) for seed, cfg in cfgs.items()}
-cfg_hashes_for_filename = {
-    seed: f"{seed}_{cfg_hashes[seed].replace('/', '__SLASH__')}"
-    for seed, cfg in cfgs.items()
-}
 model_cfgs = {
     seed: MaxOfNTrainingWrapper.build_model_config(cfg) for seed, cfg in cfgs.items()
 }
 datamodules = {seed: MaxOfNDataModule(cfg) for seed, cfg in cfgs.items()}
+cfg_hashes_for_filename = {
+    seed: f"{seed}_{cfg_hashes[seed].replace('/', '__SLASH__')}"
+    for seed, cfg in cfgs.items()
+}
 # %%
-with memoshelve(
-    train_or_load_model,
-    filename=cache_dir / f"{Path(__file__).name}.train_or_load_model",
-    get_hash=get_hash_ascii,
-)() as memo_train_or_load_model:
-    runtime_models = {}
+# patch torch.load so that when loading cache from non-CPU devices we can still load
+with patch(torch, load=partial(torch.load, map_location=torch.device("cpu"))):
+    with memoshelve(
+        train_or_load_model,
+        filename=cache_dir / f"{Path(__file__).name}.train_or_load_model",
+        get_hash=get_hash_ascii,
+    )() as memo_train_or_load_model:
+        runtime_models = {}
 
-    def _handle_memo_train_or_load_model(arg):
-        seed, cfg = arg
-        try:
-            runtime_models[seed] = memo_train_or_load_model(cfg, force="load")
-        except Exception as e:
-            print(f"Error loading model for seed {seed}: {e}")
+        def _handle_memo_train_or_load_model(arg):
+            seed, cfg = arg
+            try:
+                runtime_models[seed] = memo_train_or_load_model(cfg, force="load")
+            except Exception as e:
+                print(f"Error loading model for seed {seed}: {e}")
 
-    with ThreadPoolExecutor(max_workers=N_THREADS) as executor:
-        executor.map(_handle_memo_train_or_load_model, tqdm(cfgs.items()))
+        with ThreadPoolExecutor(max_workers=N_THREADS) as executor:
+            executor.map(_handle_memo_train_or_load_model, tqdm(cfgs.items()))
 
 # %%
 training_wrappers = {
@@ -346,7 +367,7 @@ print(f"Model Loss: {pm_round(avg_train_average_loss, std_dev_train_average_loss
 # import sys
 # sys.exit(0)
 # %%
-seed = SELECTED_SEED
+seed = selected_seed
 cfg = cfgs[seed]
 model_cfg = model_cfgs[seed]
 cfg_hash = cfg_hashes[seed]
@@ -935,7 +956,7 @@ latex_values["CubicOldDroppedSequencesFracFloat"] = cubic_old_dropped_sequences_
 # %% [markdown]
 # # Plots
 # %%
-if DISPLAY_PLOTS:
+if DISPLAY_PLOTS or SAVE_PLOTS:
     figs, axis_limits = display_basic_interpretation(
         model,
         include_uncentered=True,
@@ -945,6 +966,7 @@ if DISPLAY_PLOTS:
         tok_dtick=10,
         plot_with=PLOT_WITH,
         renderer=RENDERER,
+        show=DISPLAY_PLOTS,
     )
     for attn_scale in ("", "WithAttnScale"):
         for fig in (
@@ -1058,13 +1080,15 @@ def make_FAR_slides_plots(
             zmax=zmax,
             labels=labels,
         )
-        fig.show(renderer)
+        if DISPLAY_PLOTS:
+            fig.show(renderer)
         # remove title
         fig.update_layout(title_text="")
         fig.update(layout_coloraxis_showscale=False)
         # crop whitespace
         fig.update_layout(margin=dict(l=0, r=0, b=0, t=0))
-        fig.show(renderer)
+        if DISPLAY_PLOTS:
+            fig.show(renderer)
 
 
 ## %%
@@ -1077,7 +1101,7 @@ if DISPLAY_PLOTS:
 
 
 ## %%
-if DISPLAY_PLOTS:
+if DISPLAY_PLOTS or SAVE_PLOTS:
     figs = make_better_slides_plots_00(
         model,
         OV_colorscale=default_OV_colorscale,
@@ -1181,7 +1205,8 @@ def make_better_slides_plots_2024_03_26(
             yaxis_visible=False,
             margin=dict(l=0, r=0, b=0, t=0),
         )
-        fig.show(renderer)
+        if DISPLAY_PLOTS:
+            fig.show(renderer)
     for m, title, colorscale, zmax, labels in (
         (
             EPU,
@@ -1235,16 +1260,22 @@ def make_better_slides_plots_2024_03_26(
             labels=labels,
             **(dict(zmin=-zmax, zmax=zmax) if zmax is not None else {}),
         )
-        fig.show(renderer)
+        if DISPLAY_PLOTS:
+            fig.show(renderer)
         # remove title
         fig.update_layout(title_text="")
         fig.update(layout_coloraxis_showscale=False)
         # crop whitespace
         fig.update_layout(margin=dict(l=0, r=0, b=0, t=0))
         trim_plotly_figure(fig)
-        fig.show(renderer)
+        if DISPLAY_PLOTS:
+            fig.show(renderer)
     _, figs = find_size_and_query_direction(
-        model, plot_heatmaps=True, renderer=renderer, colorscale=QK_colorscale
+        model,
+        plot_heatmaps=True,
+        renderer=renderer,
+        colorscale=QK_colorscale,
+        show=DISPLAY_PLOTS,
     )
     assert figs is not None
     for k, fig in figs.items():
@@ -1253,7 +1284,7 @@ def make_better_slides_plots_2024_03_26(
 
 
 ## %%
-if DISPLAY_PLOTS:
+if DISPLAY_PLOTS or SAVE_PLOTS:
     figs = make_better_slides_plots_2024_03_26(model, renderer=RENDERER)
     # for k, fig in figs.items():
     #     latex_figures[f"Decomposition-{k}"] = fig
@@ -1263,9 +1294,9 @@ latex_values |= analyze_EVOU(model)
 # %% [markdown]
 # # Back of the envelope math for sub-cubic
 # %%
-if DISPLAY_PLOTS:
+if DISPLAY_PLOTS or SAVE_PLOTS:
     latex_figures["EVOU-hist-max-row-diff"], max_logit_diff = hist_EVOU_max_logit_diff(
-        model, plot_with=PLOT_WITH, renderer=RENDERER
+        model, plot_with=PLOT_WITH, renderer=RENDERER, show=DISPLAY_PLOTS
     )
     remove_titles(latex_figures["EVOU-hist-max-row-diff"])
     latex_values["EVOUMeanMaxRowDiffFloat"] = max_logit_diff.mean().item()
@@ -1280,6 +1311,7 @@ if DISPLAY_PLOTS:
                 duplicate_by_sequence_count=duplicate_by_sequence_count,
                 plot_with=PLOT_WITH,
                 renderer=RENDERER,
+                show=DISPLAY_PLOTS,
             )
         )
         remove_titles(latex_figures[key])
@@ -1317,13 +1349,14 @@ if DISPLAY_PLOTS:
 
 
 # %%
-if DISPLAY_PLOTS:
+if DISPLAY_PLOTS or SAVE_PLOTS:
     latex_figures["EQKE-scatter-attention-difference-vs-gap"] = (
         scatter_attention_difference_vs_gap(
             model,
             renderer=RENDERER,
             plot_with=PLOT_WITH,
             # plot_with="plotly",
+            show=DISPLAY_PLOTS,
         )  # this one is too big to export to TeX
     )
     for duplicate_by_sequence_count in [False, True]:
@@ -1332,6 +1365,7 @@ if DISPLAY_PLOTS:
             duplicate_by_sequence_count=duplicate_by_sequence_count,
             plot_with=PLOT_WITH,
             renderer=RENDERER,
+            show=DISPLAY_PLOTS,
         )
         key = "EQKE-hist-attention-difference-over-gap" + (
             "-dup-by-seq-count" if duplicate_by_sequence_count else ""
@@ -1456,7 +1490,7 @@ if DISPLAY_PLOTS:
 # # more plots
 # %%
 
-if DISPLAY_PLOTS:
+if DISPLAY_PLOTS or SAVE_PLOTS:
     figs, values = display_EQKE_SVD_analysis(
         model,
         plot_with=PLOT_WITH,
@@ -1465,7 +1499,7 @@ if DISPLAY_PLOTS:
         tok_dtick=10,
         renderer=RENDERER,
         include_figures=True,
-        show=True,
+        show=DISPLAY_PLOTS,
         do_print=True,
     )
     key_pairs = {}
@@ -1503,7 +1537,7 @@ if DISPLAY_PLOTS:
         QK_colorscale=default_QK_colorscale_2024_03_26,
         QK_SVD_colorscale=default_QK_colorscale_2024_03_26,
         include_figures=True,
-        show=True,
+        show=DISPLAY_PLOTS,
         do_print=True,
     )
     print(
@@ -1591,7 +1625,7 @@ if DISPLAY_PLOTS:
 # %%
 # random resampling of EQKE_err
 
-# if DISPLAY_PLOTS:
+# if DISPLAY_PLOTS or SAVE_PLOTS:
 #     figs, values = resample_EQKE_err(
 #         (
 #             W_E_query_err2,
@@ -1931,11 +1965,12 @@ cmodel = CountHookedTransformer(model)
 # err_exact = W_E_query_err2 @ W_Q_err @ W_K_errT @ W_E_key_err2T
 min_gaps_lists = {}
 with torch.no_grad():
-    W_EP_direction_kwargs = analysis_quadratic.W_EP_direction_for_tricks_kwargs(model)
-    find_min_gaps_kwargs = analysis_subcubic.find_min_gaps_with_EQKE_kwargs(model)
-    size_and_query_directions_kwargs = analysis_quadratic.find_EKQE_error_directions(
-        model
-    )
+    (
+        W_EP_direction_kwargs,
+        find_min_gaps_kwargs,
+        size_and_query_directions_kwargs,
+        shared_proof_search_duration,
+    ) = analysis_subcubic.find_proof_shared(model)
     with memoshelve(
         (
             lambda cfg: (
@@ -2073,7 +2108,7 @@ with torch.no_grad():
             left_behind / total_sequences
         )
 
-    if DISPLAY_PLOTS:
+    if DISPLAY_PLOTS or SAVE_PLOTS:
         d_vocab_q, d_vocab_max, n_ctx_nonmax_copies = min_gaps_lists[0][1].shape
         weights = torch.zeros(
             (d_vocab_q, d_vocab_max, n_ctx_nonmax_copies), dtype=torch.long
@@ -2136,6 +2171,7 @@ with torch.no_grad():
                     num_bins=v.max().item(),
                     plot_with=PLOT_WITH,
                     renderer=RENDERER,
+                    show=DISPLAY_PLOTS,
                 )
                 latex_figures[f"Subcubic{postkey}GapHistogram"] = fig
             except Exception as e:
@@ -2423,23 +2459,24 @@ if HAS_CSVS:
     data = double_singleton_groups(
         data.drop_duplicates(), column="attention_error_handling"
     )
-    fig = px.scatter(
-        data,
-        y="normalized-accuracy-bound",
-        x="EQKERatioFirstTwoSingularFloat",
-        color="attention_error_handling",
-        title="Normalized Accuracy Bound vs EQKE Ratio First Two Singular",
-        labels={
-            "normalized-accuracy-bound": "Normalized Accuracy Bound",
-            "EQKERatioFirstTwoSingularFloat": "EQKE Ratio First Two Singular",
-        },
-    )
-    # fig.update_layout(showlegend=False)
-    fig.update_layout(
-        legend=dict(orientation="h", yanchor="top", y=-0.3, xanchor="center", x=0.5)
-    )
-    # Show the plot
-    fig.show("png")
+    if DISPLAY_PLOTS:
+        fig = px.scatter(
+            data,
+            y="normalized-accuracy-bound",
+            x="EQKERatioFirstTwoSingularFloat",
+            color="attention_error_handling",
+            title="Normalized Accuracy Bound vs EQKE Ratio First Two Singular",
+            labels={
+                "normalized-accuracy-bound": "Normalized Accuracy Bound",
+                "EQKERatioFirstTwoSingularFloat": "EQKE Ratio First Two Singular",
+            },
+        )
+        # fig.update_layout(showlegend=False)
+        fig.update_layout(
+            legend=dict(orientation="h", yanchor="top", y=-0.3, xanchor="center", x=0.5)
+        )
+        # Show the plot
+        fig.show("png")
 # %%
 # plt.set_prop_cycle(color=['red', 'green', 'blue'])
 # default_colors
@@ -2548,6 +2585,7 @@ if HAS_CSVS:
             color_order=sorted_attn_err_handling,
             renderer=RENDERER,
             plot_with=PLOT_WITH,
+            show=DISPLAY_PLOTS,
             # plot_with="plotly"
         )
         # fig.update_layout(showlegend=False)
@@ -2654,6 +2692,7 @@ if HAS_CSVS:
         yaxis="Unexplained Dimension (Estimated)",
         plot_with=PLOT_WITH,
         renderer=RENDERER,
+        show=DISPLAY_PLOTS,
     )
     latex_externalize_tables["EffectiveDimensionVsFLOPDiscontinuousXY"] = True
     latex_figures["EffectiveDimensionVsFLOPDiscontinuousXY"] = fig = scatter(
@@ -2680,6 +2719,7 @@ if HAS_CSVS:
         ),
         plot_with=PLOT_WITH,
         renderer=RENDERER,
+        show=DISPLAY_PLOTS,
     )
 
 
@@ -2721,6 +2761,7 @@ if HAS_CSVS:
                 color_order=[category_name_remap[c] for c in category_order],
                 plot_with=PLOT_WITH,
                 renderer=RENDERER,
+                show=DISPLAY_PLOTS,
             )
             latex_externalize_tables[f"{key}DiscontinuousX"] = True
             latex_figures[f"{key}DiscontinuousX"] = fig = scatter(
@@ -2737,6 +2778,7 @@ if HAS_CSVS:
                 discontinuous_x=discontinuous_x,
                 plot_with=PLOT_WITH,
                 renderer=RENDERER,
+                show=DISPLAY_PLOTS,
             )
 
 
@@ -2755,22 +2797,23 @@ if HAS_CSVS:
         ].copy()
         data = double_singleton_groups(data.drop_duplicates(), column="group")
         # data["group"] = data["group"].map({k:k[:7] for k in set(data["group"])})
-        fig = px.scatter(
-            data,
-            x="proof-flop-estimate",
-            y=f"{norm}accuracy-bound",
-            symbol="group",
-            title=f"Scatter Plot of Proof Flop Estimate vs {normt}Accuracy Bound (Logarithmic X-Axis)",
-            log_x=True,
-            color="tricks",
-            # symbol_map={True: "diamond", False: "circle"},
-            # legend=False,
-        )
-        fig.update_layout(showlegend=False)
-        # Flip the x-axis
-        fig.update_layout(xaxis=dict(autorange="reversed"))
+        if DISPLAY_PLOTS:
+            fig = px.scatter(
+                data,
+                x="proof-flop-estimate",
+                y=f"{norm}accuracy-bound",
+                symbol="group",
+                title=f"Scatter Plot of Proof Flop Estimate vs {normt}Accuracy Bound (Logarithmic X-Axis)",
+                log_x=True,
+                color="tricks",
+                # symbol_map={True: "diamond", False: "circle"},
+                # legend=False,
+            )
+            fig.update_layout(showlegend=False)
+            # Flip the x-axis
+            fig.update_layout(xaxis=dict(autorange="reversed"))
 
-        fig.show()
+            fig.show()
 
 # TRAIN_CSV_PATH = ALL_MODELS_PATH / "all-models-train-values.csv"
 # TRAIN_CSV_PATH.parent.mkdir(exist_ok=True, parents=True)
